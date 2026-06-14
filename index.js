@@ -1,6 +1,7 @@
 const express = require('express');
 const axios = require('axios');
 const FormData = require('form-data');
+const fs = require('fs');
 
 const app = express();
 app.use(express.json());
@@ -9,7 +10,8 @@ const BOT_TOKEN = process.env.BOT_TOKEN;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const OWNER_CHAT_ID = 489450415;
 const TG_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
-const STORAGE_MARKER = '🗄TASKS_JSON🗄';
+const TASKS_FILE = '/data/tasks.json';
+const BACKUP_MARKER = '🗄BACKUP🗄';
 
 // ─── Telegram helpers ─────────────────────────────────────────────
 async function tg(method, params) {
@@ -29,114 +31,126 @@ async function deleteMessage(chatId, messageId) {
   try { await tg('deleteMessage', { chat_id: chatId, message_id: messageId }); } catch (e) {}
 }
 
-async function editMessage(chatId, messageId, text, parseMode = 'Markdown') {
+// ─── Storage ──────────────────────────────────────────────────────
+// Основное хранилище — файл на Render
+// Резервное — сообщение боту себе (восстанавливается при старте)
+
+let _backupMsgId = null;
+
+function loadFromFile() {
   try {
-    await tg('editMessageText', { chat_id: chatId, message_id: messageId, text, parse_mode: parseMode });
+    if (fs.existsSync(TASKS_FILE)) {
+      return JSON.parse(fs.readFileSync(TASKS_FILE, 'utf8'));
+    }
   } catch (e) {}
+  return { tasks: [], pinned_msg_id: null };
 }
 
-// ─── Storage: JSON в скрытом сообщении, список — в закреплённом ──
-// data = { tasks, _json_msg_id, _pinned_msg_id }
-
-async function loadTasks() {
+function saveToFile(data) {
   try {
-    // Ищем сообщение с маркером через getUpdates не получится — 
-    // храним ID сообщения с JSON в самом JSON (bootstrapping через pinned)
-    const chat = await tg('getChat', { chat_id: OWNER_CHAT_ID });
+    fs.writeFileSync(TASKS_FILE, JSON.stringify(data, null, 2));
+  } catch (e) {
+    console.error('saveToFile error:', e.message);
+  }
+}
 
-    // Сначала ищем pinned — там может быть либо JSON (старый формат), либо красивый список
-    if (chat.pinned_message) {
-      const pinText = chat.pinned_message.text || '';
-      if (pinText.startsWith(STORAGE_MARKER)) {
-        // Старый формат — мигрируем
-        const json = pinText.replace(STORAGE_MARKER + '\n', '');
+async function saveBackupToTelegram(data) {
+  try {
+    const json = JSON.stringify({ tasks: data.tasks, pinned_msg_id: data.pinned_msg_id });
+    const text = `${BACKUP_MARKER}\n${json}`;
+    if (_backupMsgId) {
+      try {
+        await tg('editMessageText', { chat_id: OWNER_CHAT_ID, message_id: _backupMsgId, text });
+        return;
+      } catch (e) { _backupMsgId = null; }
+    }
+    const msg = await tg('sendMessage', {
+      chat_id: OWNER_CHAT_ID,
+      text,
+      disable_notification: true
+    });
+    _backupMsgId = msg.message_id;
+  } catch (e) {
+    console.error('saveBackup error:', e.message);
+  }
+}
+
+async function restoreFromTelegram() {
+  // Ищем backup сообщение в последних сообщениях
+  try {
+    const updates = await tg('getUpdates', { limit: 100, offset: -100 });
+    for (const u of (updates || []).reverse()) {
+      const msg = u.message;
+      if (msg && msg.chat.id === OWNER_CHAT_ID && msg.text && msg.text.startsWith(BACKUP_MARKER)) {
+        const json = msg.text.replace(BACKUP_MARKER + '\n', '');
         const data = JSON.parse(json);
-        data._pinned_msg_id = chat.pinned_message.message_id;
-        data._json_msg_id = null;
+        _backupMsgId = msg.message_id;
         return data;
       }
     }
-
-    // Ищем JSON-сообщение — оно хранит свой собственный ID внутри
-    // Используем trick: отправляем getUpdates с большим offset чтобы найти наше сообщение
-    // Вместо этого — храним _json_msg_id в pinned message через кастомный формат
-    // Закреплённое сообщение содержит в конце скрытую строку: \n\n_id:12345_
-    if (chat.pinned_message) {
-      const pinText = chat.pinned_message.text || '';
-      const idMatch = pinText.match(/\n_json:(\d+)_$/);
-      if (idMatch) {
-        const jsonMsgId = parseInt(idMatch[1]);
-        // Получаем JSON из того сообщения через forwardMessage trick — не работает
-        // Используем копию данных из pinned
-        return {
-          tasks: [],
-          _pinned_msg_id: chat.pinned_message.message_id,
-          _json_msg_id: jsonMsgId
-        };
-      }
-    }
-  } catch (e) {
-    console.error('loadTasks error:', e.message);
-  }
-  return { tasks: [], _pinned_msg_id: null, _json_msg_id: null };
+  } catch (e) {}
+  return null;
 }
 
-// Упрощённый надёжный подход: храним всё в одном закреплённом сообщении,
-// но показываем красивый список + JSON спрятан в конце невидимым образом (HTML entities trick не работает в TG)
-// Лучший вариант: два сообщения. Одно закреплённое красивое, одно с JSON — тихо редактируем.
+async function loadTasks() {
+  // Сначала пробуем файл
+  const fromFile = loadFromFile();
+  if (fromFile.tasks && fromFile.tasks.length > 0) return fromFile;
 
-// Финальный подход: JSON храним в закреплённом сообщении в формате который не виден пользователю —
-// используем code block в самом конце, свёрнутый. Нет, TG так не умеет.
-// 
-// Реальное решение: закреплённое = красивый список. JSON-данные = в отдельном незакреплённом сообщении
-// ID json-сообщения вшиваем в красивый список как невидимый текст в конце (zero-width space trick).
-// Но надёжнее — просто хранить ID json-сообщения в переменной окружения... нельзя менять динамически.
-//
-// ИТОГ: храним ОБА в одном закреплённом сообщении:
-// - Видимая часть: красивый список
-// - После разделителя "‌" (zero-width non-joiner): JSON данные в отдельной строке без форматирования
-
-async function loadTasksV2() {
-  try {
-    const chat = await tg('getChat', { chat_id: OWNER_CHAT_ID });
-    if (!chat.pinned_message) return { tasks: [], _pinned_msg_id: null };
-
-    const text = chat.pinned_message.text || '';
-    const sep = '\n' + STORAGE_MARKER + '\n';
-    const idx = text.indexOf(sep);
-    if (idx !== -1) {
-      const json = text.slice(idx + sep.length);
-      const data = JSON.parse(json);
-      data._pinned_msg_id = chat.pinned_message.message_id;
-      return data;
-    }
-  } catch (e) {
-    console.error('loadTasks error:', e.message);
+  // Если файл пуст — восстанавливаем из Telegram
+  const fromTelegram = await restoreFromTelegram();
+  if (fromTelegram) {
+    saveToFile(fromTelegram);
+    return fromTelegram;
   }
-  return { tasks: [], _pinned_msg_id: null };
+
+  return { tasks: [], pinned_msg_id: null };
 }
 
-async function saveTasksV2(data) {
+async function saveTasks(data) {
+  saveToFile(data);
+  await saveBackupToTelegram(data);
+}
+
+// ─── Pinned message (красивый список) ────────────────────────────
+async function updatePinnedList(data) {
   try {
-    const pinnedId = data._pinned_msg_id;
-    const payload = { tasks: data.tasks, pending: data.pending };
-    const json = JSON.stringify(payload);
-    const sep = '\n' + STORAGE_MARKER + '\n';
-
-    // Красивый список (видимая часть)
-    const listText = formatTaskListForPin(data);
-    const fullText = listText + sep + json;
-
-    if (pinnedId) {
-      // Удаляем старое закреплённое
-      await tg('unpinChatMessage', { chat_id: OWNER_CHAT_ID, message_id: pinnedId });
-      await deleteMessage(OWNER_CHAT_ID, pinnedId);
+    // Удаляем старое закреплённое
+    if (data.pinned_msg_id) {
+      await tg('unpinChatMessage', { chat_id: OWNER_CHAT_ID, message_id: data.pinned_msg_id });
+      await deleteMessage(OWNER_CHAT_ID, data.pinned_msg_id);
+      data.pinned_msg_id = null;
     }
 
-    // Создаём новое
+    const open = data.tasks.filter(t => t.status === 'open' && !isOverdue(t));
+    const overdue = data.tasks.filter(t => isOverdue(t));
+
+    // Не закрепляем если задач нет
+    if (!open.length && !overdue.length) return;
+
+    let text = '📋 *Задачи*\n';
+    const now = new Date().toLocaleString('ru-RU', {
+      timeZone: 'Europe/Moscow', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit'
+    });
+    text += `_${now}_\n\n`;
+
+    if (overdue.length) {
+      text += '⚠️ *Просроченные:*\n';
+      overdue.forEach(t => text += `#${t.id} — ${t.text} 📅 ${formatDate(t.deadline)}\n`);
+      text += '\n';
+    }
+    if (open.length) {
+      text += '📌 *Открытые:*\n';
+      open.forEach(t => {
+        text += `#${t.id} — ${t.text}`;
+        if (t.deadline) text += ` 📅 ${formatDate(t.deadline)}`;
+        text += '\n';
+      });
+    }
+
     const msg = await tg('sendMessage', {
       chat_id: OWNER_CHAT_ID,
-      text: fullText,
+      text,
       parse_mode: 'Markdown',
       disable_notification: true
     });
@@ -145,36 +159,10 @@ async function saveTasksV2(data) {
       message_id: msg.message_id,
       disable_notification: true
     });
-    data._pinned_msg_id = msg.message_id;
+    data.pinned_msg_id = msg.message_id;
   } catch (e) {
-    console.error('saveTasks error:', e.message);
+    console.error('updatePinnedList error:', e.message);
   }
-}
-
-function formatTaskListForPin(data) {
-  const open = data.tasks ? data.tasks.filter(t => t.status === 'open' && !isOverdue(t)) : [];
-  const overdue = data.tasks ? data.tasks.filter(t => isOverdue(t)) : [];
-
-  let msg = '📋 *Список задач*\n';
-  msg += `_Обновлено: ${new Date().toLocaleString('ru-RU', {timeZone:'Europe/Moscow', day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit'})}_\n\n`;
-
-  if (overdue.length) {
-    msg += '⚠️ *Просроченные:*\n';
-    overdue.forEach(t => msg += `#${t.id} — ${t.text} 📅 ${formatDate(t.deadline)}\n`);
-    msg += '\n';
-  }
-  if (open.length) {
-    msg += '📌 *Открытые:*\n';
-    open.forEach(t => {
-      msg += `#${t.id} — ${t.text}`;
-      if (t.deadline) msg += ` 📅 ${formatDate(t.deadline)}`;
-      msg += '\n';
-    });
-  }
-  if (!open.length && !overdue.length) {
-    msg += '_Задач нет_';
-  }
-  return msg;
 }
 
 // ─── Whisper ──────────────────────────────────────────────────────
@@ -204,27 +192,24 @@ async function downloadFile(filePath) {
 async function parseWithGPT(text) {
   const prompt = `Ты — умный таск-менеджер. Разбери входящее сообщение от пользователя.
 
-Входящее сообщение:
-"""
-${text}
-"""
+Сообщение: """${text}"""
 
-Ответь строго в формате JSON:
+Ответь в JSON:
 {
   "type": "tasks" | "command" | "unclear",
-  "tasks": [{ "text": "Формулировка с глагола", "deadline": "YYYY-MM-DD или null" }],
+  "tasks": [{ "text": "формулировка с глагола", "deadline": "YYYY-MM-DD или null" }],
   "command": "list" | "done" | "delete" | "postpone" | null,
   "command_arg": "номер или текст задачи или null",
   "command_deadline": "YYYY-MM-DD или null",
-  "reason": "объяснение если unclear"
+  "reason": "если unclear"
 }
 
 Правила:
-- Если задача(и) — type="tasks", перефразируй лаконично с глагола, разбей на отдельные если несколько
-- Если команда управления списком — type="command"
-- Если цитата, пересланный текст, вопрос, разговор — type="unclear"
+- tasks: перефразируй лаконично с глагола, разбей на отдельные если несколько
+- command: команды управления списком (показать, закрыть, удалить, перенести)
+- unclear: цитата, пересланный текст, вопрос, разговор
 - Дедлайн YYYY-MM-DD, сегодня: ${new Date().toISOString().slice(0,10)}
-- При сомнении — type="unclear"`;
+- При сомнении — unclear`;
 
   const res = await axios.post('https://api.openai.com/v1/chat/completions', {
     model: 'gpt-4o',
@@ -250,10 +235,10 @@ function formatDate(dateStr) {
 
 function isOverdue(task) {
   if (!task.deadline || task.status === 'done') return false;
-  return task.deadline < new Date().toISOString().slice(0,10);
+  return task.deadline < new Date().toISOString().slice(0, 10);
 }
 
-function formatTaskList(data) {
+function formatTaskListFull(data) {
   const open = data.tasks.filter(t => t.status === 'open' && !isOverdue(t));
   const overdue = data.tasks.filter(t => isOverdue(t));
   const done = data.tasks.filter(t => t.status === 'done').slice(-5);
@@ -289,7 +274,7 @@ function addTasksToData(taskItems, data) {
       text: item.text,
       deadline: item.deadline || null,
       status: 'open',
-      created_at: new Date().toISOString().slice(0,10)
+      created_at: new Date().toISOString().slice(0, 10)
     };
     data.tasks.push(newTask);
     added.push(newTask);
@@ -301,6 +286,7 @@ function addTasksToData(taskItems, data) {
 async function processText(text, data) {
   const lower = text.toLowerCase().trim();
 
+  // Подтверждение/отмена
   if (/^да$/i.test(lower) && data.pending && data.pending.length) {
     const items = [...data.pending];
     delete data.pending;
@@ -334,13 +320,13 @@ async function processText(text, data) {
   if (parsed.type === 'command') {
     switch (parsed.command) {
       case 'list':
-        await sendMessage(OWNER_CHAT_ID, formatTaskList(data));
+        await sendMessage(OWNER_CHAT_ID, formatTaskListFull(data));
         break;
 
       case 'done': {
         const arg = parsed.command_arg;
         const task = data.tasks.find(t => t.id === parseInt(arg))
-          || data.tasks.find(t => t.text.toLowerCase().includes((arg||'').toLowerCase()) && t.status === 'open');
+          || data.tasks.find(t => t.text.toLowerCase().includes((arg || '').toLowerCase()) && t.status === 'open');
         if (task) {
           task.status = 'done';
           await sendMessage(OWNER_CHAT_ID, `✔️ *Задача выполнена* (#${task.id})\n_${task.text}_`);
@@ -377,7 +363,7 @@ async function processText(text, data) {
       }
 
       default:
-        await sendMessage(OWNER_CHAT_ID, formatTaskList(data));
+        await sendMessage(OWNER_CHAT_ID, formatTaskListFull(data));
     }
 
   } else if (parsed.type === 'tasks' && parsed.tasks && parsed.tasks.length) {
@@ -394,7 +380,7 @@ async function processText(text, data) {
   } else {
     if (parsed.tasks && parsed.tasks.length) {
       data.pending = parsed.tasks;
-      const preview = parsed.tasks.map((t, i) => `${i+1}. ${t.text}${t.deadline ? ' 📅 ' + formatDate(t.deadline) : ''}`).join('\n');
+      const preview = parsed.tasks.map((t, i) => `${i + 1}. ${t.text}${t.deadline ? ' 📅 ' + formatDate(t.deadline) : ''}`).join('\n');
       await sendMessage(OWNER_CHAT_ID, `❓ *Добавить как задачу?*\n${preview}\n\nОтвети *да* или *нет*`);
     } else {
       await sendMessage(OWNER_CHAT_ID, `❓ Не понял — это задача?\n_${parsed.reason || ''}_`);
@@ -413,7 +399,7 @@ app.post('/webhook', async (req, res) => {
     if (!msg) return;
     if (msg.chat.id !== OWNER_CHAT_ID) return;
 
-    const data = await loadTasksV2();
+    const data = await loadTasks();
     let text = null;
 
     if (msg.text) {
@@ -428,10 +414,9 @@ app.post('/webhook', async (req, res) => {
 
     if (text) {
       const changed = await processText(text, data);
-      // Обновляем закреплённое только если что-то изменилось
-      if (changed || data.pending !== undefined) {
-        await saveTasksV2(data);
-      }
+      await saveTasks(data);
+      if (changed) await updatePinnedList(data);
+      await saveTasks(data); // сохраняем pinned_msg_id
     }
   } catch (err) {
     console.error('Webhook error:', err.message);
