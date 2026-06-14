@@ -11,17 +11,14 @@ const BOT_TOKEN = process.env.BOT_TOKEN;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const OWNER_CHAT_ID = 489450415;
 const TASKS_FILE = path.join('/tmp', 'tasks.json');
-
 const TG_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
 
-// ─── Tasks storage ───────────────────────────────────────────────
+// ─── Tasks storage ────────────────────────────────────────────────
 function loadTasks() {
   try {
-    if (fs.existsSync(TASKS_FILE)) {
-      return JSON.parse(fs.readFileSync(TASKS_FILE, 'utf8'));
-    }
+    if (fs.existsSync(TASKS_FILE)) return JSON.parse(fs.readFileSync(TASKS_FILE, 'utf8'));
   } catch (e) {}
-  return { last_update_id: 0, tasks: [] };
+  return { tasks: [] };
 }
 
 function saveTasks(data) {
@@ -31,11 +28,7 @@ function saveTasks(data) {
 // ─── Telegram helpers ─────────────────────────────────────────────
 async function sendMessage(chatId, text, parseMode = 'Markdown') {
   try {
-    await axios.post(`${TG_API}/sendMessage`, {
-      chat_id: chatId,
-      text,
-      parse_mode: parseMode
-    });
+    await axios.post(`${TG_API}/sendMessage`, { chat_id: chatId, text, parse_mode: parseMode });
   } catch (e) {
     console.error('sendMessage error:', e.response?.data || e.message);
   }
@@ -58,64 +51,62 @@ async function transcribeAudio(buffer, filename) {
   form.append('file', buffer, { filename: filename || 'voice.ogg', contentType: 'audio/ogg' });
   form.append('model', 'whisper-1');
   form.append('language', 'ru');
-
   const res = await axios.post('https://api.openai.com/v1/audio/transcriptions', form, {
-    headers: {
-      ...form.getHeaders(),
-      'Authorization': `Bearer ${OPENAI_API_KEY}`
-    }
+    headers: { ...form.getHeaders(), 'Authorization': `Bearer ${OPENAI_API_KEY}` }
   });
   return res.data.text;
 }
 
-// ─── Task logic ───────────────────────────────────────────────────
-function parseDeadline(text) {
-  const months = {
-    'янв': '01', 'фев': '02', 'мар': '03', 'апр': '04',
-    'май': '05', 'мая': '05', 'июн': '06', 'июл': '07',
-    'авг': '08', 'сен': '09', 'окт': '10', 'ноя': '11', 'дек': '12'
-  };
+// ─── GPT-4o: parse message into tasks ────────────────────────────
+async function parseWithGPT(text) {
+  const prompt = `Ты — умный таск-менеджер. Твоя задача — разобрать входящее сообщение от пользователя.
 
-  const now = new Date();
-  const year = now.getFullYear();
+Входящее сообщение:
+"""
+${text}
+"""
 
-  // "до 20 июня", "до 20.06", "до 20/06"
-  const m1 = text.match(/до\s+(\d{1,2})[.\s\/](\d{1,2})/i);
-  if (m1) return `${year}-${m1[2].padStart(2,'0')}-${m1[1].padStart(2,'0')}`;
+Определи:
+1. Является ли это сообщение задачей (или несколькими задачами), командой, или просто разговором/цитатой/пересланным текстом.
+2. Если это задача(и) — раздели на отдельные задачи, перефразируй каждую чётко и кратко (убери лишнее, исправь опечатки, сделай формулировку чистой), извлеки дедлайн если указан.
+3. Если это НЕ задача — объясни почему (команда управления списком, разговорная фраза, пересланный текст, вопрос и т.д.)
 
-  // "до 20 июня 2026"
-  const m2 = text.match(/до\s+(\d{1,2})\s+(янв|фев|мар|апр|май|мая|июн|июл|авг|сен|окт|ноя|дек)\w*(?:\s+(\d{4}))?/i);
-  if (m2) {
-    const mon = months[m2[2].toLowerCase().slice(0,3)];
-    const yr = m2[3] || year;
-    return `${yr}-${mon}-${m2[1].padStart(2,'0')}`;
-  }
-
-  // "до пятницы / до конца недели"
-  const weekdays = { 'понедельник': 1, 'вторник': 2, 'среда': 3, 'четверг': 4, 'пятница': 5, 'суббота': 6, 'воскресенье': 0 };
-  const m3 = text.match(/до\s+(понедельник|вторник|среду?|четверг|пятниц[ыу]?|субботы?|воскресенья?)/i);
-  if (m3) {
-    const dayName = m3[1].toLowerCase();
-    const target = Object.entries(weekdays).find(([k]) => dayName.startsWith(k.slice(0,4)));
-    if (target) {
-      const d = new Date(now);
-      const diff = (target[1] - d.getDay() + 7) % 7 || 7;
-      d.setDate(d.getDate() + diff);
-      return d.toISOString().slice(0,10);
+Ответь строго в формате JSON:
+{
+  "type": "tasks" | "command" | "unclear",
+  "tasks": [
+    {
+      "text": "Чёткая формулировка задачи",
+      "deadline": "YYYY-MM-DD или null"
     }
-  }
-
-  // "до конца недели"
-  if (/до конца недели/i.test(text)) {
-    const d = new Date(now);
-    const diff = (5 - d.getDay() + 7) % 7 || 7;
-    d.setDate(d.getDate() + diff);
-    return d.toISOString().slice(0,10);
-  }
-
-  return null;
+  ],
+  "command": "list" | "done" | "delete" | "postpone" | "confirm" | "cancel" | null,
+  "command_arg": "аргумент команды или null",
+  "reason": "объяснение если type=unclear"
 }
 
+Правила:
+- tasks заполняй только если type="tasks"
+- command заполняй только если type="command"
+- Если в одном сообщении несколько задач — возвращай все в массиве tasks
+- Дедлайн указывай в формате YYYY-MM-DD, если не указан — null
+- Сегодняшняя дата: ${new Date().toISOString().slice(0,10)}
+- Перефразируй задачи чисто и лаконично на русском, начиная с глагола (позвонить, отправить, оплатить...)
+- Если сомневаешься — используй type="unclear"`;
+
+  const res = await axios.post('https://api.openai.com/v1/chat/completions', {
+    model: 'gpt-4o',
+    messages: [{ role: 'user', content: prompt }],
+    response_format: { type: 'json_object' },
+    temperature: 0.2
+  }, {
+    headers: { 'Authorization': `Bearer ${OPENAI_API_KEY}`, 'Content-Type': 'application/json' }
+  });
+
+  return JSON.parse(res.data.choices[0].message.content);
+}
+
+// ─── Task helpers ─────────────────────────────────────────────────
 function nextTaskId(tasks) {
   if (!tasks.length) return 1;
   return Math.max(...tasks.map(t => t.id)) + 1;
@@ -144,7 +135,6 @@ function formatTaskList(data) {
     overdue.forEach(t => msg += `#${t.id} — ${t.text} 📅 ${formatDate(t.deadline)}\n`);
     msg += '\n';
   }
-
   if (open.length) {
     msg += '📌 *Открытые:*\n';
     open.forEach(t => {
@@ -154,108 +144,143 @@ function formatTaskList(data) {
     });
     msg += '\n';
   }
-
   if (done.length) {
     msg += '✔️ *Выполненные (последние 5):*\n';
     done.forEach(t => msg += `#${t.id} — ${t.text}\n`);
   }
-
-  if (!open.length && !overdue.length && !done.length) {
-    msg += '_Список задач пуст._';
-  }
+  if (!open.length && !overdue.length && !done.length) msg += '_Список задач пуст._';
 
   return msg;
+}
+
+function addTasksToData(taskItems, data) {
+  const added = [];
+  for (const item of taskItems) {
+    const newTask = {
+      id: nextTaskId(data.tasks),
+      text: item.text,
+      deadline: item.deadline || null,
+      status: 'open',
+      created_at: new Date().toISOString().slice(0,10),
+      category: 'work'
+    };
+    data.tasks.push(newTask);
+    added.push(newTask);
+  }
+  return added;
 }
 
 // ─── Message processor ────────────────────────────────────────────
 async function processText(text, data) {
   const lower = text.toLowerCase().trim();
 
-  // Показать список
-  if (/^(список|задачи|что у меня|покажи задачи|мои задачи)$/i.test(lower)) {
-    await sendMessage(OWNER_CHAT_ID, formatTaskList(data));
-    return;
-  }
-
-  // Закрыть задачу
-  const doneMatch = lower.match(/^(готово|done|закрыть|выполнено|закончил|сделал)[:\s]+(.+)$/i)
-    || lower.match(/^#?(\d+)\s+(готово|done|закрыть|выполнено|закончил|сделал)$/i);
-  if (doneMatch) {
-    const query = doneMatch[2] || doneMatch[1];
-    const byId = data.tasks.find(t => t.id === parseInt(query));
-    const byText = data.tasks.find(t => t.text.toLowerCase().includes(query.toLowerCase()) && t.status === 'open');
-    const task = byId || byText;
-    if (task) {
-      task.status = 'done';
-      await sendMessage(OWNER_CHAT_ID, `✔️ *Задача выполнена* (#${task.id})\n_${task.text}_`);
+  // Подтверждение/отмена ожидающих задач (быстрая проверка без GPT)
+  if (/^да$/i.test(lower) && data.pending && data.pending.length) {
+    const items = [...data.pending];
+    delete data.pending;
+    const added = addTasksToData(items, data);
+    if (added.length === 1) {
+      await sendMessage(OWNER_CHAT_ID,
+        `✅ *Задача добавлена* (#${added[0].id})\n_${added[0].text}_\n${added[0].deadline ? '📅 ' + formatDate(added[0].deadline) : '📅 Без дедлайна'}`);
     } else {
-      await sendMessage(OWNER_CHAT_ID, `❌ Задача не найдена: _${query}_`);
+      const lines = added.map(t => `#${t.id} — ${t.text}${t.deadline ? ' 📅 ' + formatDate(t.deadline) : ''}`).join('\n');
+      await sendMessage(OWNER_CHAT_ID, `✅ *Добавлено задач: ${added.length}*\n${lines}`);
     }
     return;
   }
 
-  // Перенести дедлайн
-  const moveMatch = text.match(/перенести\s+#?(\d+)\s+на\s+(.+)/i);
-  if (moveMatch) {
-    const task = data.tasks.find(t => t.id === parseInt(moveMatch[1]));
-    if (task) {
-      const newDeadline = parseDeadline('до ' + moveMatch[2]);
-      task.deadline = newDeadline;
-      await sendMessage(OWNER_CHAT_ID, `📅 *Дедлайн обновлён* (#${task.id})\n_${task.text}_\nНовый дедлайн: ${newDeadline ? formatDate(newDeadline) : 'без дедлайна'}`);
-    } else {
-      await sendMessage(OWNER_CHAT_ID, `❌ Задача #${moveMatch[1]} не найдена`);
-    }
+  if (/^нет$/i.test(lower) && data.pending) {
+    delete data.pending;
+    await sendMessage(OWNER_CHAT_ID, '↩️ Отменено.');
     return;
   }
 
-  // Удалить задачу
-  const delMatch = text.match(/удалить\s+#?(\d+)/i);
-  if (delMatch) {
-    const idx = data.tasks.findIndex(t => t.id === parseInt(delMatch[1]));
-    if (idx !== -1) {
-      const task = data.tasks.splice(idx, 1)[0];
-      await sendMessage(OWNER_CHAT_ID, `🗑 *Задача удалена* (#${task.id})\n_${task.text}_`);
-    } else {
-      await sendMessage(OWNER_CHAT_ID, `❌ Задача #${delMatch[1]} не найдена`);
-    }
+  // Прогоняем через GPT
+  let parsed;
+  try {
+    parsed = await parseWithGPT(text);
+  } catch (e) {
+    console.error('GPT error:', e.message);
+    await sendMessage(OWNER_CHAT_ID, '⚠️ Ошибка обработки, попробуй ещё раз.');
     return;
   }
 
-  // Добавить задачу (всё остальное)
-  const deadline = parseDeadline(text);
-  const cleanText = text
-    .replace(/до\s+\d{1,2}[.\s\/]\d{1,2}(\.\d{4})?/gi, '')
-    .replace(/до\s+\d{1,2}\s+(янв|фев|мар|апр|май|мая|июн|июл|авг|сен|окт|ноя|дек)\w*/gi, '')
-    .replace(/до\s+(понедельник|вторник|среду?|четверг|пятниц[ыу]?|субботы?|воскресенья?)/gi, '')
-    .replace(/до конца недели/gi, '')
-    .replace(/\s+/g, ' ')
-    .trim();
+  if (parsed.type === 'command') {
+    switch (parsed.command) {
+      case 'list':
+        await sendMessage(OWNER_CHAT_ID, formatTaskList(data));
+        break;
 
-  const newTask = {
-    id: nextTaskId(data.tasks),
-    text: cleanText,
-    deadline,
-    status: 'open',
-    created_at: new Date().toISOString().slice(0,10),
-    category: 'work'
-  };
-  data.tasks.push(newTask);
+      case 'done': {
+        const arg = parsed.command_arg;
+        const byId = data.tasks.find(t => t.id === parseInt(arg));
+        const byText = data.tasks.find(t => t.text.toLowerCase().includes((arg||'').toLowerCase()) && t.status === 'open');
+        const task = byId || byText;
+        if (task) {
+          task.status = 'done';
+          await sendMessage(OWNER_CHAT_ID, `✔️ *Задача выполнена* (#${task.id})\n_${task.text}_`);
+        } else {
+          await sendMessage(OWNER_CHAT_ID, `❌ Задача не найдена: _${arg}_`);
+        }
+        break;
+      }
 
-  let reply = `✅ *Задача добавлена* (#${newTask.id})\n_${newTask.text}_\n`;
-  reply += deadline ? `📅 Дедлайн: ${formatDate(deadline)}` : `📅 Без дедлайна`;
-  await sendMessage(OWNER_CHAT_ID, reply);
+      case 'delete': {
+        const idx = data.tasks.findIndex(t => t.id === parseInt(parsed.command_arg));
+        if (idx !== -1) {
+          const task = data.tasks.splice(idx, 1)[0];
+          await sendMessage(OWNER_CHAT_ID, `🗑 *Задача удалена* (#${task.id})\n_${task.text}_`);
+        } else {
+          await sendMessage(OWNER_CHAT_ID, `❌ Задача #${parsed.command_arg} не найдена`);
+        }
+        break;
+      }
+
+      case 'postpone': {
+        const task = data.tasks.find(t => t.id === parseInt(parsed.command_arg));
+        if (task && parsed.tasks && parsed.tasks[0]?.deadline) {
+          task.deadline = parsed.tasks[0].deadline;
+          await sendMessage(OWNER_CHAT_ID,
+            `📅 *Дедлайн обновлён* (#${task.id})\n_${task.text}_\nНовый дедлайн: ${formatDate(task.deadline)}`);
+        } else {
+          await sendMessage(OWNER_CHAT_ID, `❌ Не удалось обновить дедлайн`);
+        }
+        break;
+      }
+
+      default:
+        await sendMessage(OWNER_CHAT_ID, formatTaskList(data));
+    }
+
+  } else if (parsed.type === 'tasks' && parsed.tasks && parsed.tasks.length) {
+    const added = addTasksToData(parsed.tasks, data);
+    if (added.length === 1) {
+      await sendMessage(OWNER_CHAT_ID,
+        `✅ *Задача добавлена* (#${added[0].id})\n_${added[0].text}_\n${added[0].deadline ? '📅 ' + formatDate(added[0].deadline) : '📅 Без дедлайна'}`);
+    } else {
+      const lines = added.map(t => `#${t.id} — ${t.text}${t.deadline ? ' 📅 ' + formatDate(t.deadline) : ''}`).join('\n');
+      await sendMessage(OWNER_CHAT_ID, `✅ *Добавлено задач: ${added.length}*\n${lines}`);
+    }
+
+  } else {
+    // unclear — спрашиваем
+    if (parsed.tasks && parsed.tasks.length) {
+      data.pending = parsed.tasks;
+      const preview = parsed.tasks.map((t, i) => `${i+1}. ${t.text}${t.deadline ? ' 📅 ' + formatDate(t.deadline) : ''}`).join('\n');
+      await sendMessage(OWNER_CHAT_ID, `❓ *Добавить как задачу?*\n${preview}\n\nОтвети *да* или *нет*`);
+    } else {
+      await sendMessage(OWNER_CHAT_ID, `❓ Не понял — это задача? Если да, перефразируй чётче или ответь *да*.\n_${parsed.reason || ''}_`);
+    }
+  }
 }
 
 // ─── Webhook handler ──────────────────────────────────────────────
 app.post('/webhook', async (req, res) => {
-  res.sendStatus(200); // Отвечаем Telegram сразу
-
+  res.sendStatus(200);
   try {
     const update = req.body;
     const msg = update.message || update.edited_message;
     if (!msg) return;
-
-    // Только сообщения от владельца
     if (msg.chat.id !== OWNER_CHAT_ID) return;
 
     const data = loadTasks();
@@ -268,8 +293,6 @@ app.post('/webhook', async (req, res) => {
       const filePath = await getFile(fileId);
       const buffer = await downloadFile(filePath);
       text = await transcribeAudio(buffer, 'voice.ogg');
-
-      // Отправляем расшифровку чтобы пользователь видел что понял бот
       await sendMessage(OWNER_CHAT_ID, `🎤 _Распознано:_ "${text}"`);
     }
 
@@ -277,13 +300,11 @@ app.post('/webhook', async (req, res) => {
       await processText(text, data);
       saveTasks(data);
     }
-
   } catch (err) {
     console.error('Webhook error:', err.message);
   }
 });
 
-// ─── Health check ─────────────────────────────────────────────────
 app.get('/', (req, res) => res.json({ status: 'ok', bot: 'GALP Task Bot' }));
 
 const PORT = process.env.PORT || 3000;
