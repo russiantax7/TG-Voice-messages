@@ -379,12 +379,8 @@ app.post('/webhook', async (req, res) => {
     }
 
     if (text) {
-      const changed = await processText(text, data);
+      await processText(text, data);
       saveTasks(data);
-      if (changed) {
-        await updatePinnedList(data);
-        saveTasks(data);
-      }
     }
   } catch (err) {
     console.error('Webhook error:', err.message);
@@ -395,6 +391,14 @@ app.post('/webhook', async (req, res) => {
 app.get('/tasks', (req, res) => {
   const data = loadTasks();
   res.json(data);
+});
+
+app.post('/tasks/replace', (req, res) => {
+  const secret = req.headers['x-secret'];
+  if (secret !== process.env.ADMIN_SECRET) return res.status(403).json({ error: 'forbidden' });
+  const data = req.body;
+  saveTasks(data);
+  res.json({ ok: true });
 });
 
 // ─── /summary — резюме дня для cron ──────────────────────────────
