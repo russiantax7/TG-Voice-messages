@@ -11,6 +11,17 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const OWNER_CHAT_ID = 489450415;
 const TG_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
 const TASKS_FILE = '/data/tasks.json';
+const MESSAGES_FILE = '/data/messages.json';
+
+// Известные рабочие чаты
+const WORK_CHATS = new Set([-462206422, -788559454, -5570418094, -5161080891, -5077349043]);
+const CHAT_NAMES = {
+  '-462206422': 'GALP Tax',
+  '-788559454': 'GALP Incorporation',
+  '-5570418094': 'PA Shindyaeva',
+  '-5161080891': 'AG, SB, YK',
+  '-5077349043': 'Taneev House'
+};
 
 // ─── Telegram helpers ─────────────────────────────────────────────
 async function tg(method, params) {
@@ -30,7 +41,7 @@ async function deleteMessage(messageId) {
   try { await tg('deleteMessage', { chat_id: OWNER_CHAT_ID, message_id: messageId }); } catch (e) {}
 }
 
-// ─── File storage ─────────────────────────────────────────────────
+// ─── Tasks storage ────────────────────────────────────────────────
 function loadTasks() {
   try {
     if (fs.existsSync(TASKS_FILE)) return JSON.parse(fs.readFileSync(TASKS_FILE, 'utf8'));
@@ -44,10 +55,39 @@ function saveTasks(data) {
   }
 }
 
+// ─── Chat messages storage ────────────────────────────────────────
+// Накапливаем сообщения из рабочих чатов для дневного резюме
+function loadMessages() {
+  try {
+    if (fs.existsSync(MESSAGES_FILE)) return JSON.parse(fs.readFileSync(MESSAGES_FILE, 'utf8'));
+  } catch (e) {}
+  return [];
+}
+
+function saveMessages(messages) {
+  try { fs.writeFileSync(MESSAGES_FILE, JSON.stringify(messages, null, 2)); } catch (e) {}
+}
+
+function storeGroupMessage(msg) {
+  const messages = loadMessages();
+  const chatId = msg.chat.id;
+  const from = msg.from?.first_name || msg.from?.username || 'Unknown';
+  const text = msg.text || msg.caption || '[медиа]';
+  messages.push({
+    chat_id: chatId,
+    chat_name: CHAT_NAMES[String(chatId)] || String(chatId),
+    from,
+    text,
+    date: msg.date
+  });
+  // Храним только последние 7 дней
+  const cutoff = Date.now() / 1000 - 7 * 24 * 3600;
+  saveMessages(messages.filter(m => m.date > cutoff));
+}
+
 // ─── Pinned list ──────────────────────────────────────────────────
 async function updatePinnedList(data) {
   try {
-    // Удаляем старое
     if (data.pinned_msg_id) {
       try { await tg('unpinChatMessage', { chat_id: OWNER_CHAT_ID, message_id: data.pinned_msg_id }); } catch (e) {}
       await deleteMessage(data.pinned_msg_id);
@@ -78,15 +118,10 @@ async function updatePinnedList(data) {
     }
 
     const msg = await tg('sendMessage', {
-      chat_id: OWNER_CHAT_ID,
-      text,
-      parse_mode: 'Markdown',
-      disable_notification: true
+      chat_id: OWNER_CHAT_ID, text, parse_mode: 'Markdown', disable_notification: true
     });
     await tg('pinChatMessage', {
-      chat_id: OWNER_CHAT_ID,
-      message_id: msg.message_id,
-      disable_notification: true
+      chat_id: OWNER_CHAT_ID, message_id: msg.message_id, disable_notification: true
     });
     data.pinned_msg_id = msg.message_id;
   } catch (e) {
@@ -113,7 +148,7 @@ async function downloadVoice(fileId) {
   return Buffer.from(res.data);
 }
 
-// ─── GPT-4o ───────────────────────────────────────────────────────
+// ─── GPT helpers ──────────────────────────────────────────────────
 async function parseWithGPT(text) {
   const res = await axios.post('https://api.openai.com/v1/chat/completions', {
     model: 'gpt-4o',
@@ -127,23 +162,60 @@ async function parseWithGPT(text) {
 {
   "type": "tasks" | "command" | "unclear",
   "tasks": [{ "text": "формулировка с глагола", "deadline": "YYYY-MM-DD или null" }],
-  "command": "list" | "done" | "delete" | "postpone" | null,
+  "command": "list" | "done" | "delete" | "postpone" | "pin" | null,
   "command_arg": "номер или текст задачи или null",
   "command_deadline": "YYYY-MM-DD или null",
   "reason": "если unclear"
 }
 
 Правила:
-- tasks: перефразируй лаконично с глагола, разбей на отдельные если несколько в одном сообщении
-- command: команды управления (показать список, закрыть, удалить, перенести дедлайн, закрепить/обновить список — command="pin")
-- unclear: цитата, пересланный текст, вопрос, разговорная фраза — спроси подтверждение
+- tasks: перефразируй лаконично с глагола, разбей на отдельные если несколько
+- command: list=показать список, done=выполнено, delete=удалить, postpone=перенести дедлайн, pin=закрепить/обновить список
+- unclear: цитата, пересланный текст, вопрос, разговор
 - Сегодня: ${new Date().toISOString().slice(0, 10)}`
     }],
     response_format: { type: 'json_object' },
     temperature: 0.2
   }, { headers: { 'Authorization': `Bearer ${OPENAI_API_KEY}`, 'Content-Type': 'application/json' } });
-
   return JSON.parse(res.data.choices[0].message.content);
+}
+
+async function makeDailySummary(messages) {
+  const dateStr = new Date().toLocaleDateString('ru-RU', { timeZone: 'Europe/Moscow' });
+
+  if (!messages.length) {
+    return `📋 *Резюме дня — ${dateStr}*\n\n_Сообщений в рабочих чатах сегодня не было._`;
+  }
+
+  const msgText = messages.map(m => `[${m.chat_name}] ${m.from}: ${m.text}`).join('\n');
+
+  const res = await axios.post('https://api.openai.com/v1/chat/completions', {
+    model: 'gpt-4o',
+    messages: [{
+      role: 'user',
+      content: `Составь краткое резюме рабочего дня команды GALP по переписке. Сегодня ${dateStr}.
+
+Переписка:
+${msgText}
+
+Формат (Markdown):
+📋 *Резюме дня — ${dateStr}*
+
+*Ключевые темы:*
+— ...
+
+*Решено:*
+— ...
+
+*В работе / Открытые вопросы:*
+— ...
+
+*Итог дня:* одна фраза.`
+    }],
+    temperature: 0.3
+  }, { headers: { 'Authorization': `Bearer ${OPENAI_API_KEY}`, 'Content-Type': 'application/json' } });
+
+  return res.data.choices[0].message.content;
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────
@@ -193,11 +265,10 @@ function addTasks(items, data) {
   });
 }
 
-// ─── Message processor ────────────────────────────────────────────
+// ─── Message processor (личка) ────────────────────────────────────
 async function processText(text, data) {
   const lower = text.toLowerCase().trim();
 
-  // Подтверждение/отмена pending задач
   if (/^да$/i.test(lower) && data.pending?.length) {
     const added = addTasks(data.pending, data);
     delete data.pending;
@@ -214,7 +285,6 @@ async function processText(text, data) {
     return false;
   }
 
-  // GPT
   let parsed;
   try { parsed = await parseWithGPT(text); }
   catch (e) { await sendMessage('⚠️ Ошибка обработки, попробуй ещё раз.'); return false; }
@@ -282,8 +352,20 @@ async function processText(text, data) {
 app.post('/webhook', async (req, res) => {
   res.sendStatus(200);
   try {
-    const msg = req.body.message || req.body.edited_message;
-    if (!msg || msg.chat.id !== OWNER_CHAT_ID) return;
+    const update = req.body;
+    const msg = update.message || update.edited_message;
+    if (!msg) return;
+
+    const chatId = msg.chat.id;
+
+    // Сообщение из рабочего чата — сохраняем для резюме
+    if (WORK_CHATS.has(chatId) && (msg.text || msg.caption)) {
+      storeGroupMessage(msg);
+      return;
+    }
+
+    // Личка с владельцем — таск-менеджер
+    if (chatId !== OWNER_CHAT_ID) return;
 
     const data = loadTasks();
     let text = null;
@@ -297,14 +379,44 @@ app.post('/webhook', async (req, res) => {
     }
 
     if (text) {
-      await processText(text, data);
+      const changed = await processText(text, data);
       saveTasks(data);
+      if (changed) {
+        await updatePinnedList(data);
+        saveTasks(data);
+      }
     }
   } catch (err) {
     console.error('Webhook error:', err.message);
   }
 });
 
+// ─── /tasks — список задач для cron ──────────────────────────────
+app.get('/tasks', (req, res) => {
+  const data = loadTasks();
+  res.json(data);
+});
+
+// ─── /summary — резюме дня для cron ──────────────────────────────
+app.post('/summary', async (req, res) => {
+  res.json({ status: 'started' });
+  try {
+    const messages = loadMessages();
+    const nowMSK = new Date(Date.now() + 3 * 3600 * 1000);
+    const startOfDay = new Date(nowMSK);
+    startOfDay.setHours(0, 0, 0, 0);
+    const startTimestamp = (startOfDay.getTime() - 3 * 3600 * 1000) / 1000;
+
+    const todayMessages = messages.filter(m => m.date >= startTimestamp);
+    const summary = await makeDailySummary(todayMessages);
+    await sendMessage(summary);
+  } catch (e) {
+    console.error('/summary error:', e.message);
+    await sendMessage('⚠️ Ошибка при формировании резюме дня.');
+  }
+});
+
 app.get('/', (req, res) => res.json({ status: 'ok' }));
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Bot running on port ${PORT}`));
