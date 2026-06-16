@@ -441,6 +441,11 @@ app.post('/summary', async (req, res) => {
   }
 });
 
+app.get('/messages', (req, res) => {
+  const messages = loadMessages();
+  res.json(messages.slice(-50));
+});
+
 app.get('/', (req, res) => res.json({ status: 'ok' }));
 
 const PORT = process.env.PORT || 3000;
