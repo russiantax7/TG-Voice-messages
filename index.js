@@ -448,7 +448,7 @@ app.post('/webhook', async (req, res) => {
           const parsed = await parseCalendarEvent(text);
           if (parsed.is_event) {
             await createCalendarEvent(parsed.summary, parsed.start, parsed.end);
-            const dateStr = new Date(parsed.start).toLocaleString('ru-RU', { timeZone: 'Europe/Moscow', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+            const dateStr = new Date(parsed.start + '+03:00').toLocaleString('ru-RU', { timeZone: 'Europe/Moscow', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
             await sendMessage(`📅 Событие добавлено в календарь:\n*${parsed.summary}*\n${dateStr}`);
             return;
           }
