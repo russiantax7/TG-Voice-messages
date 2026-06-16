@@ -450,7 +450,11 @@ app.post('/webhook', async (req, res) => {
           if (parsed.is_event) {
             const tz = parsed.timezone || 'Europe/Moscow';
             await createCalendarEvent(parsed.summary, parsed.start, parsed.end, '', tz);
-            const dateStr = new Date(parsed.start).toLocaleString('ru-RU', { timeZone: tz, day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+            // GPT возвращает время без offset — парсим как локальное время нужного пояса
+            const [datePart, timePart] = parsed.start.split('T');
+            const [year, month, day] = datePart.split('-').map(Number);
+            const [hour, minute] = timePart.split(':').map(Number);
+            const dateStr = `${String(day).padStart(2,'0')}.${String(month).padStart(2,'0')} ${String(hour).padStart(2,'0')}:${String(minute).padStart(2,'0')}`;
             const tzLabel = tz === 'Europe/Moscow' ? 'МСК' : tz;
             await sendMessage(`📅 Событие добавлено в календарь:\n*${parsed.summary}*\n${dateStr} (${tzLabel})`);
             return;
