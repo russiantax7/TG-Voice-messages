@@ -2,6 +2,47 @@ const express = require('express');
 const axios = require('axios');
 const FormData = require('form-data');
 const fs = require('fs');
+const { google } = require('googleapis');
+
+// ─── Google Calendar ──────────────────────────────────────────────
+const CALENDAR_ID = 'aguskov@galp.ru';
+const GOOGLE_CREDENTIALS = JSON.parse(process.env.GOOGLE_CREDENTIALS || '{}');
+
+function getCalendarClient() {
+  const auth = new google.auth.JWT(
+    GOOGLE_CREDENTIALS.client_email,
+    null,
+    GOOGLE_CREDENTIALS.private_key,
+    ['https://www.googleapis.com/auth/calendar']
+  );
+  return google.calendar({ version: 'v3', auth });
+}
+
+async function createCalendarEvent(summary, startDateTime, endDateTime, description) {
+  const calendar = getCalendarClient();
+  const event = {
+    summary,
+    description: description || '',
+    start: { dateTime: startDateTime, timeZone: 'Europe/Moscow' },
+    end:   { dateTime: endDateTime,   timeZone: 'Europe/Moscow' }
+  };
+  const res = await calendar.events.insert({ calendarId: CALENDAR_ID, requestBody: event });
+  return res.data;
+}
+
+async function parseCalendarEvent(text) {
+  // Используем GPT чтобы распарсить дату/время/название события
+  const today = new Date().toLocaleDateString('ru-RU', { timeZone: 'Europe/Moscow', weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+  const res = await axios.post('https://api.openai.com/v1/chat/completions', {
+    model: 'gpt-4o',
+    messages: [
+      { role: 'system', content: `Ты парсишь текст и извлекаешь событие для календаря. Сегодня: ${today} (часовой пояс Europe/Moscow). Верни JSON: {"summary": "название", "start": "YYYY-MM-DDTHH:MM:SS", "end": "YYYY-MM-DDTHH:MM:SS", "is_event": true/false}. Если это не событие/встреча — верни is_event: false. Если время окончания не указано — добавь 1 час к началу. Верни только JSON без markdown.` },
+      { role: 'user', content: text }
+    ],
+    temperature: 0
+  }, { headers: { Authorization: `Bearer ${OPENAI_API_KEY}` } });
+  return JSON.parse(res.data.choices[0].message.content);
+}
 
 const app = express();
 app.use(express.json());
@@ -400,6 +441,21 @@ app.post('/webhook', async (req, res) => {
     }
 
     if (text) {
+      // Проверяем — не событие ли это для календаря
+      const calKeywords = /календар|встреч|событи|запиши на|назначь|совещани|звонок|созвон|ужин|обед|поездк/i;
+      if (calKeywords.test(text)) {
+        try {
+          const parsed = await parseCalendarEvent(text);
+          if (parsed.is_event) {
+            await createCalendarEvent(parsed.summary, parsed.start, parsed.end);
+            const dateStr = new Date(parsed.start).toLocaleString('ru-RU', { timeZone: 'Europe/Moscow', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+            await sendMessage(`📅 Событие добавлено в календарь:\n*${parsed.summary}*\n${dateStr}`);
+            return;
+          }
+        } catch (e) {
+          console.error('Calendar error:', e.message);
+        }
+      }
       await processText(text, data);
       saveTasks(data);
     }
