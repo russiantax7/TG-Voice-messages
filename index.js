@@ -31,13 +31,37 @@ async function createCalendarEvent(summary, startDateTime, endDateTime, descript
   return res.data;
 }
 
+// ─── Events storage ──────────────────────────────────────────────
+function loadEvents() {
+  try { return JSON.parse(fs.readFileSync(EVENTS_FILE, 'utf8')); } catch { return []; }
+}
+function saveEvents(events) {
+  fs.writeFileSync(EVENTS_FILE, JSON.stringify(events, null, 2));
+}
+async function deleteCalendarEvent(eventId) {
+  const calendar = getCalendarClient();
+  await calendar.events.delete({ calendarId: CALENDAR_ID, eventId });
+}
+async function updateCalendarEvent(eventId, summary, startDateTime, endDateTime, timezone) {
+  const calendar = getCalendarClient();
+  const tz = timezone || 'Europe/Moscow';
+  await calendar.events.patch({
+    calendarId: CALENDAR_ID, eventId,
+    requestBody: {
+      summary,
+      start: { dateTime: startDateTime, timeZone: tz },
+      end:   { dateTime: endDateTime,   timeZone: tz }
+    }
+  });
+}
+
 async function parseCalendarEvent(text) {
   // Используем GPT чтобы распарсить дату/время/название события
   const today = new Date().toLocaleDateString('ru-RU', { timeZone: 'Europe/Moscow', weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
   const res = await axios.post('https://api.openai.com/v1/chat/completions', {
     model: 'gpt-4o',
     messages: [
-      { role: 'system', content: `Ты парсишь текст и извлекаешь событие для календаря. Сегодня: ${today} (часовой пояс Europe/Moscow). Верни JSON: {"summary": "название", "start": "YYYY-MM-DDTHH:MM:SS", "end": "YYYY-MM-DDTHH:MM:SS", "timezone": "часовой пояс", "is_event": true/false}. Правила: 1) Если в тексте упомянут город или страна — определи их часовой пояс (например, Дубай → Asia/Dubai, Лондон → Europe/London, Нью-Йорк → America/New_York). 2) Если город/страна не упомянуты — используй Europe/Moscow. 3) Если это не событие/встреча — верни is_event: false. 4) Если время окончания не указано — добавь 1 час к началу. Верни только JSON без markdown.` },
+      { role: 'system', content: `Ты парсишь текст и извлекаешь событие для календаря. Сегодня: ${today} (часовой пояс Europe/Moscow). Верни JSON: {"action": "create/delete/update", "summary": "название", "start": "YYYY-MM-DDTHH:MM:SS", "end": "YYYY-MM-DDTHH:MM:SS", "timezone": "часовой пояс", "search_query": "ключевые слова для поиска", "is_event": true/false}. Правила: 1) action=create — новое событие. action=delete — удалить (заполни search_query). action=update — перенести (заполни search_query, start, end). 2) Если в тексте упомянут город — определи часовой пояс (Дубай → Asia/Dubai, Лондон → Europe/London, Нью-Йорк → America/New_York), иначе Europe/Moscow. 3) Если это не событие — is_event: false. 4) Если время окончания не указано — добавь 1 час. Верни только JSON без markdown.` },
       { role: 'user', content: text }
     ],
     temperature: 0
@@ -54,6 +78,7 @@ const OWNER_CHAT_ID = 489450415;
 const TG_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
 const TASKS_FILE = '/data/tasks.json';
 const MESSAGES_FILE = '/data/messages.json';
+const EVENTS_FILE = '/data/events.json';
 
 // Известные рабочие чаты
 const WORK_CHATS = new Set([-462206422, -788559454, -5570418094, -5161080891, -5077349043]);
@@ -442,22 +467,45 @@ app.post('/webhook', async (req, res) => {
     }
 
     if (text) {
-      // Проверяем — не событие ли это для календаря
-      const calKeywords = /календар|встреч|событи|запиши на|назначь|совещани|звонок|созвон|ужин|обед|поездк/i;
+      // Проверяем — не команда ли это для календаря
+      const calKeywords = /календар|встреч|событи|запиши на|назначь|совещани|звонок|созвон|ужин|обед|поездк|перенес|удали встреч|удали событи|отмен/i;
       if (calKeywords.test(text)) {
         try {
           const parsed = await parseCalendarEvent(text);
           if (parsed.is_event) {
             const tz = parsed.timezone || 'Europe/Moscow';
-            await createCalendarEvent(parsed.summary, parsed.start, parsed.end, '', tz);
-            // GPT возвращает время без offset — парсим как локальное время нужного пояса
-            const [datePart, timePart] = parsed.start.split('T');
-            const [year, month, day] = datePart.split('-').map(Number);
-            const [hour, minute] = timePart.split(':').map(Number);
-            const dateStr = `${String(day).padStart(2,'0')}.${String(month).padStart(2,'0')} ${String(hour).padStart(2,'0')}:${String(minute).padStart(2,'0')}`;
+            const action = parsed.action || 'create';
             const tzLabel = tz === 'Europe/Moscow' ? 'МСК' : tz;
-            await sendMessage(`📅 Событие добавлено в календарь:\n*${parsed.summary}*\n${dateStr} (${tzLabel})`);
-            return;
+            const fmtDate = (s) => { const [dp,tp] = s.split('T'); const [,m,d] = dp.split('-'); const [hh,mm] = tp.split(':'); return `${d}.${m} ${hh}:${mm}`; };
+
+            if (action === 'create') {
+              const created = await createCalendarEvent(parsed.summary, parsed.start, parsed.end, '', tz);
+              const events = loadEvents();
+              events.push({ id: created.id, summary: parsed.summary, start: parsed.start });
+              saveEvents(events);
+              await sendMessage(`📅 Событие добавлено в календарь:\n*${parsed.summary}*\n${fmtDate(parsed.start)} (${tzLabel})`);
+              return;
+            }
+
+            if (action === 'delete' || action === 'update') {
+              const events = loadEvents();
+              const q = (parsed.search_query || parsed.summary || '').toLowerCase();
+              const found = events.find(e => e.summary.toLowerCase().includes(q) || q.split(' ').some(w => w.length > 2 && e.summary.toLowerCase().includes(w)));
+              if (!found) {
+                await sendMessage(`❓ Не нашёл событие: _${parsed.search_query || parsed.summary}_\nПопробуй уточнить название.`);
+                return;
+              }
+              if (action === 'delete') {
+                await deleteCalendarEvent(found.id);
+                saveEvents(events.filter(e => e.id !== found.id));
+                await sendMessage(`🗑 Событие удалено:\n*${found.summary}*`);
+              } else {
+                await updateCalendarEvent(found.id, found.summary, parsed.start, parsed.end, tz);
+                saveEvents(events.map(e => e.id === found.id ? { ...e, start: parsed.start } : e));
+                await sendMessage(`📅 Событие перенесено:\n*${found.summary}*\n${fmtDate(parsed.start)} (${tzLabel})`);
+              }
+              return;
+            }
           }
         } catch (e) {
           console.error('Calendar error:', e.message);
