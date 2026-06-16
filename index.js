@@ -359,8 +359,29 @@ app.post('/webhook', async (req, res) => {
     const chatId = msg.chat.id;
 
     // Сообщение из рабочего чата — сохраняем для резюме
-    if (WORK_CHATS.has(chatId) && (msg.text || msg.caption)) {
-      storeGroupMessage(msg);
+    if (WORK_CHATS.has(chatId)) {
+      if (msg.text || msg.caption) {
+        storeGroupMessage(msg);
+      } else if (msg.voice || msg.audio) {
+        try {
+          const buffer = await downloadVoice((msg.voice || msg.audio).file_id);
+          const transcribed = await transcribeAudio(buffer);
+          // Сохраняем как обычное сообщение с пометкой 🎤
+          const from = msg.from?.first_name || msg.from?.username || 'Unknown';
+          const messages = loadMessages();
+          messages.push({
+            chat_id: chatId,
+            chat_name: CHAT_NAMES[String(chatId)] || String(chatId),
+            from,
+            text: `🎤 ${transcribed}`,
+            date: msg.date
+          });
+          const cutoff = Date.now() / 1000 - 7 * 24 * 3600;
+          saveMessages(messages.filter(m => m.date > cutoff));
+        } catch (e) {
+          console.error('Group voice transcription error:', e.message);
+        }
+      }
       return;
     }
 
