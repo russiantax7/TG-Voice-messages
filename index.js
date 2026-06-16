@@ -18,13 +18,14 @@ function getCalendarClient() {
   return google.calendar({ version: 'v3', auth });
 }
 
-async function createCalendarEvent(summary, startDateTime, endDateTime, description) {
+async function createCalendarEvent(summary, startDateTime, endDateTime, description, timezone) {
   const calendar = getCalendarClient();
+  const tz = timezone || 'Europe/Moscow';
   const event = {
     summary,
     description: description || '',
-    start: { dateTime: startDateTime, timeZone: 'Europe/Moscow' },
-    end:   { dateTime: endDateTime,   timeZone: 'Europe/Moscow' }
+    start: { dateTime: startDateTime, timeZone: tz },
+    end:   { dateTime: endDateTime,   timeZone: tz }
   };
   const res = await calendar.events.insert({ calendarId: CALENDAR_ID, requestBody: event });
   return res.data;
@@ -36,7 +37,7 @@ async function parseCalendarEvent(text) {
   const res = await axios.post('https://api.openai.com/v1/chat/completions', {
     model: 'gpt-4o',
     messages: [
-      { role: 'system', content: `Ты парсишь текст и извлекаешь событие для календаря. Сегодня: ${today} (часовой пояс Europe/Moscow). Верни JSON: {"summary": "название", "start": "YYYY-MM-DDTHH:MM:SS", "end": "YYYY-MM-DDTHH:MM:SS", "is_event": true/false}. Если это не событие/встреча — верни is_event: false. Если время окончания не указано — добавь 1 час к началу. Верни только JSON без markdown.` },
+      { role: 'system', content: `Ты парсишь текст и извлекаешь событие для календаря. Сегодня: ${today} (часовой пояс Europe/Moscow). Верни JSON: {"summary": "название", "start": "YYYY-MM-DDTHH:MM:SS", "end": "YYYY-MM-DDTHH:MM:SS", "timezone": "часовой пояс", "is_event": true/false}. Правила: 1) Если в тексте упомянут город или страна — определи их часовой пояс (например, Дубай → Asia/Dubai, Лондон → Europe/London, Нью-Йорк → America/New_York). 2) Если город/страна не упомянуты — используй Europe/Moscow. 3) Если это не событие/встреча — верни is_event: false. 4) Если время окончания не указано — добавь 1 час к началу. Верни только JSON без markdown.` },
       { role: 'user', content: text }
     ],
     temperature: 0
@@ -447,9 +448,11 @@ app.post('/webhook', async (req, res) => {
         try {
           const parsed = await parseCalendarEvent(text);
           if (parsed.is_event) {
-            await createCalendarEvent(parsed.summary, parsed.start, parsed.end);
-            const dateStr = new Date(parsed.start + '+03:00').toLocaleString('ru-RU', { timeZone: 'Europe/Moscow', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
-            await sendMessage(`📅 Событие добавлено в календарь:\n*${parsed.summary}*\n${dateStr}`);
+            const tz = parsed.timezone || 'Europe/Moscow';
+            await createCalendarEvent(parsed.summary, parsed.start, parsed.end, '', tz);
+            const dateStr = new Date(parsed.start).toLocaleString('ru-RU', { timeZone: tz, day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+            const tzLabel = tz === 'Europe/Moscow' ? 'МСК' : tz;
+            await sendMessage(`📅 Событие добавлено в календарь:\n*${parsed.summary}*\n${dateStr} (${tzLabel})`);
             return;
           }
         } catch (e) {
