@@ -555,10 +555,30 @@ app.post('/summary', async (req, res) => {
     const startOfDay = new Date(nowMSK);
     startOfDay.setHours(0, 0, 0, 0);
     const startTimestamp = (startOfDay.getTime() - 3 * 3600 * 1000) / 1000;
+    const todayMsgs = messages.filter(m => m.date >= startTimestamp);
+    const dateStr = nowMSK.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric' });
 
-    const todayMessages = messages.filter(m => m.date >= startTimestamp);
-    const summary = await makeDailySummary(todayMessages);
-    await sendMessage(summary);
+    const makeSummary = async (msgs, title) => {
+      if (msgs.length === 0) {
+        await sendMessage(`📋 *${title} — ${dateStr}*\n\nСообщений сегодня не было.`);
+        return;
+      }
+      const text = msgs.map(m => `[${m.chat_name}] ${m.from}: ${m.text}`).join('\n');
+      const r = await axios.post('https://api.openai.com/v1/chat/completions', {
+        model: 'gpt-4o',
+        messages: [
+          { role: 'system', content: 'Ты составляешь краткое резюме рабочего дня на основе переписки. Выдели ключевые решения, задачи и важные моменты. Пиши на русском, кратко и по делу.' },
+          { role: 'user', content: text }
+        ]
+      }, { headers: { Authorization: `Bearer ${OPENAI_API_KEY}` } });
+      await sendMessage(`📋 *${title} — ${dateStr}*\n\n${r.data.choices[0].message.content}`);
+    };
+
+    const paMsgs = todayMsgs.filter(m => m.chat_name === 'PA Shindyaeva');
+    const otherMsgs = todayMsgs.filter(m => m.chat_name !== 'PA Shindyaeva');
+
+    await makeSummary(paMsgs, 'Резюме: PA Shindyaeva');
+    await makeSummary(otherMsgs, 'Резюме: Рабочие чаты');
   } catch (e) {
     console.error('/summary error:', e.message);
     await sendMessage('⚠️ Ошибка при формировании резюме дня.');
