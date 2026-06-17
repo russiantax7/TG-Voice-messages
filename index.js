@@ -6,6 +6,7 @@ const { google } = require('googleapis');
 
 // ─── Google Calendar ──────────────────────────────────────────────
 const CALENDAR_ID = 'aguskov@galp.ru';
+const SUMMARY_HOUR = 20; // Час отправки резюме (МСК) — менять только здесь
 const GOOGLE_CREDENTIALS = JSON.parse(process.env.GOOGLE_CREDENTIALS || '{}');
 
 function getCalendarClient() {
@@ -559,7 +560,7 @@ app.post('/summary', async (req, res) => {
     const daysBack = dayOfWeek === 1 ? 3 : 1; // пн → 3 дня назад (пт), иначе 1 день
     const prevDay = new Date(nowMSK);
     prevDay.setDate(prevDay.getDate() - daysBack);
-    prevDay.setHours(20, 0, 0, 0);
+    prevDay.setHours(SUMMARY_HOUR, 0, 0, 0);
     const startTimestamp = (prevDay.getTime() - 3 * 3600 * 1000) / 1000;
     const todayMsgs = messages.filter(m => m.date >= startTimestamp);
     const dateStr = nowMSK.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric' });
