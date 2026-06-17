@@ -18,7 +18,7 @@ function getCalendarClient() {
   return google.calendar({ version: 'v3', auth });
 }
 
-async function createCalendarEvent(summary, startDateTime, endDateTime, description, timezone) {
+async function createCalendarEvent(summary, startDateTime, endDateTime, description, timezone, location, attendees) {
   const calendar = getCalendarClient();
   const tz = timezone || 'Europe/Moscow';
   const event = {
@@ -27,7 +27,11 @@ async function createCalendarEvent(summary, startDateTime, endDateTime, descript
     start: { dateTime: startDateTime, timeZone: tz },
     end:   { dateTime: endDateTime,   timeZone: tz }
   };
-  const res = await calendar.events.insert({ calendarId: CALENDAR_ID, requestBody: event });
+  if (location) event.location = location;
+  if (attendees && attendees.length > 0) {
+    event.attendees = attendees.map(email => ({ email }));
+  }
+  const res = await calendar.events.insert({ calendarId: CALENDAR_ID, requestBody: event, sendUpdates: attendees && attendees.length > 0 ? 'all' : 'none' });
   return res.data;
 }
 
@@ -42,16 +46,19 @@ async function deleteCalendarEvent(eventId) {
   const calendar = getCalendarClient();
   await calendar.events.delete({ calendarId: CALENDAR_ID, eventId });
 }
-async function updateCalendarEvent(eventId, summary, startDateTime, endDateTime, timezone) {
+async function updateCalendarEvent(eventId, summary, startDateTime, endDateTime, timezone, location, attendees) {
   const calendar = getCalendarClient();
   const tz = timezone || 'Europe/Moscow';
+  const requestBody = {
+    summary,
+    start: { dateTime: startDateTime, timeZone: tz },
+    end:   { dateTime: endDateTime,   timeZone: tz }
+  };
+  if (location) requestBody.location = location;
+  if (attendees && attendees.length > 0) requestBody.attendees = attendees.map(email => ({ email }));
   await calendar.events.patch({
-    calendarId: CALENDAR_ID, eventId,
-    requestBody: {
-      summary,
-      start: { dateTime: startDateTime, timeZone: tz },
-      end:   { dateTime: endDateTime,   timeZone: tz }
-    }
+    calendarId: CALENDAR_ID, eventId, requestBody,
+    sendUpdates: attendees && attendees.length > 0 ? 'all' : 'none'
   });
 }
 
@@ -61,7 +68,7 @@ async function parseCalendarEvent(text) {
   const res = await axios.post('https://api.openai.com/v1/chat/completions', {
     model: 'gpt-4o',
     messages: [
-      { role: 'system', content: `Ты парсишь текст и извлекаешь событие для календаря. Сегодня: ${today} (часовой пояс Europe/Moscow). Верни JSON: {"action": "create/delete/update", "summary": "название", "start": "YYYY-MM-DDTHH:MM:SS", "end": "YYYY-MM-DDTHH:MM:SS", "timezone": "часовой пояс", "search_query": "ключевые слова для поиска", "is_event": true/false}. Правила: 1) action=create — новое событие. action=delete — удалить (заполни search_query). action=update — перенести (заполни search_query, start, end). 2) Если в тексте упомянут город — определи часовой пояс (Дубай → Asia/Dubai, Лондон → Europe/London, Нью-Йорк → America/New_York), иначе Europe/Moscow. 3) Если это не событие — is_event: false. 4) Если время окончания не указано — добавь 1 час. Верни только JSON без markdown.` },
+      { role: 'system', content: `Ты парсишь текст и извлекаешь событие для календаря. Сегодня: ${today} (часовой пояс Europe/Moscow). Верни JSON: {"action": "create/delete/update", "summary": "название", "start": "YYYY-MM-DDTHH:MM:SS", "end": "YYYY-MM-DDTHH:MM:SS", "timezone": "часовой пояс", "location": "адрес или null", "attendees": ["email1", "email2"] или [], "search_query": "ключевые слова для поиска", "is_event": true/false}. Правила: 1) action=create — новое событие. action=delete — удалить (заполни search_query). action=update — перенести/изменить (заполни search_query и новые поля). 2) Если в тексте упомянут город — определи часовой пояс (Дубай → Asia/Dubai, Лондон → Europe/London, Нью-Йорк → America/New_York), иначе Europe/Moscow. 3) location — адрес встречи если упомянут, иначе null. 4) attendees — список email участников если упомянуты, иначе []. 5) Если это не событие — is_event: false. 6) Если время окончания не указано — добавь 1 час. Верни только JSON без markdown.` },
       { role: 'user', content: text }
     ],
     temperature: 0
@@ -479,11 +486,14 @@ app.post('/webhook', async (req, res) => {
             const fmtDate = (s) => { const [dp,tp] = s.split('T'); const [,m,d] = dp.split('-'); const [hh,mm] = tp.split(':'); return `${d}.${m} ${hh}:${mm}`; };
 
             if (action === 'create') {
-              const created = await createCalendarEvent(parsed.summary, parsed.start, parsed.end, '', tz);
+              const created = await createCalendarEvent(parsed.summary, parsed.start, parsed.end, '', tz, parsed.location, parsed.attendees);
               const events = loadEvents();
               events.push({ id: created.id, summary: parsed.summary, start: parsed.start });
               saveEvents(events);
-              await sendMessage(`📅 Событие добавлено в календарь:\n*${parsed.summary}*\n${fmtDate(parsed.start)} (${tzLabel})`);
+              let confirmMsg = `📅 Событие добавлено в календарь:\n*${parsed.summary}*\n${fmtDate(parsed.start)} (${tzLabel})`;
+              if (parsed.location) confirmMsg += `\n📍 ${parsed.location}`;
+              if (parsed.attendees && parsed.attendees.length > 0) confirmMsg += `\n👥 ${parsed.attendees.join(', ')}`;
+              await sendMessage(confirmMsg);
               return;
             }
 
@@ -500,9 +510,12 @@ app.post('/webhook', async (req, res) => {
                 saveEvents(events.filter(e => e.id !== found.id));
                 await sendMessage(`🗑 Событие удалено:\n*${found.summary}*`);
               } else {
-                await updateCalendarEvent(found.id, found.summary, parsed.start, parsed.end, tz);
+                await updateCalendarEvent(found.id, found.summary, parsed.start, parsed.end, tz, parsed.location, parsed.attendees);
                 saveEvents(events.map(e => e.id === found.id ? { ...e, start: parsed.start } : e));
-                await sendMessage(`📅 Событие перенесено:\n*${found.summary}*\n${fmtDate(parsed.start)} (${tzLabel})`);
+                let updateMsg = `📅 Событие обновлено:\n*${found.summary}*\n${fmtDate(parsed.start)} (${tzLabel})`;
+                if (parsed.location) updateMsg += `\n📍 ${parsed.location}`;
+                if (parsed.attendees && parsed.attendees.length > 0) updateMsg += `\n👥 ${parsed.attendees.join(', ')}`;
+                await sendMessage(updateMsg);
               }
               return;
             }
