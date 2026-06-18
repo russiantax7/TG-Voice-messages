@@ -69,7 +69,7 @@ async function parseCalendarEvent(text) {
   const res = await axios.post('https://api.openai.com/v1/chat/completions', {
     model: 'gpt-4o',
     messages: [
-      { role: 'system', content: `Ты парсишь текст и извлекаешь событие для календаря. Сегодня: ${today} (часовой пояс Europe/Moscow). Верни JSON: {"action": "create/delete/update", "summary": "название", "start": "YYYY-MM-DDTHH:MM:SS", "end": "YYYY-MM-DDTHH:MM:SS", "timezone": "часовой пояс", "location": "адрес или null", "attendees": ["email1", "email2"] или [], "search_query": "ключевые слова для поиска", "is_event": true/false}. Правила: 1) action=create — новое событие. action=delete — удалить (заполни search_query). action=update — перенести/изменить (заполни search_query и новые поля). 2) Если в тексте упомянут город — определи часовой пояс (Дубай → Asia/Dubai, Лондон → Europe/London, Нью-Йорк → America/New_York), иначе Europe/Moscow. 3) location — адрес встречи если упомянут, иначе null. 4) attendees — список email участников если упомянуты, иначе []. 5) Если это не событие — is_event: false. 6) Если время окончания не указано — добавь 1 час. Верни только JSON без markdown.` },
+      { role: 'system', content: `Ты парсишь текст и извлекаешь событие для календаря. Сегодня: ${today} (часовой пояс Europe/Moscow). Верни JSON: {"action": "create/delete/update", "summary": "название", "start": "YYYY-MM-DDTHH:MM:SS", "end": "YYYY-MM-DDTHH:MM:SS", "timezone": "часовой пояс", "location": "адрес или null", "attendees": ["email1", "email2"] или [], "search_query": "ключевые слова для поиска", "is_event": true/false}. Правила: 1) action=create — новое событие. action=delete — удалить (заполни search_query). action=update — перенести/изменить (заполни search_query и новые поля). 2) Если в тексте упомянут город — определи часовой пояс (Дубай → Asia/Dubai, Лондон → Europe/London, Нью-Йорк → America/New_York), иначе Europe/Moscow. 3) location — адрес встречи если упомянут, иначе null. 4) attendees — список email участников если упомянуты, иначе []. 5) Если это не событие или это рассказ о прошедшем событии ("встретился", "был на встрече", "обсудили") — is_event: false. 6) Если время окончания не указано — добавь 1 час. Верни только JSON без markdown.` },
       { role: 'user', content: text }
     ],
     temperature: 0
@@ -509,7 +509,8 @@ app.post('/webhook', async (req, res) => {
 
     if (text) {
       // Проверяем — не команда ли это для календаря
-      const calKeywords = /календар|встреч|событи|запиши на|назначь|совещани|звонок|созвон|ужин|обед|поездк|перенес|удали встреч|удали событи|отмен/i;
+      // Только явные команды на добавление/изменение события (не рассказы о прошлом)
+      const calKeywords = /запиши на|запишь|назначь|добавь в календар|в календар|создай встреч|запланируй|запланиров|созвон на|встреча в пятн|встреча в пон|встреча в вт|встреча в ср|встреча в чет|встреча в суб|встреча в вос|встреча завтра|встреча сегодня|ужин в|обед в|поездка в|перенеси встреч|удали встреч|удали событи|отмени встреч/i;
       if (calKeywords.test(text)) {
         try {
           const parsed = await parseCalendarEvent(text);
