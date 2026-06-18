@@ -238,7 +238,8 @@ async function parseWithGPT(text) {
   "type": "tasks" | "command" | "unclear",
   "tasks": [{ "text": "формулировка с глагола", "deadline": "YYYY-MM-DD или null" }],
   "command": "list" | "done" | "delete" | "postpone" | "pin" | null,
-  "command_arg": "номер или текст задачи или null",
+  "command_arg": "номер или текст задачи (для одиночных команд) или null",
+  "command_args": [1, 2, 3],
   "command_deadline": "YYYY-MM-DD или null",
   "reason": "если unclear"
 }
@@ -246,6 +247,7 @@ async function parseWithGPT(text) {
 Правила:
 - tasks: перефразируй лаконично с глагола, разбей на отдельные если несколько
 - command: list=показать список, done=выполнено, delete=удалить, postpone=перенести дедлайн, pin=закрепить/обновить список
+- command_args: если в команде несколько ID ("удали 1, 2, 3" или "готово 1 2 3") — заполни массив числами. Иначе пустой массив [].
 - unclear: цитата, пересланный текст, вопрос, разговор
 - Сегодня: ${new Date().toISOString().slice(0, 10)}`
     }],
@@ -372,18 +374,49 @@ async function processText(text, data) {
         await sendMessage(fullList(data)); break;
 
       case 'done': {
-        const arg = parsed.command_arg;
-        const task = data.tasks.find(t => t.id === parseInt(arg) && t.status === 'open')
-          || data.tasks.find(t => t.text.toLowerCase().includes((arg || '').toLowerCase()) && t.status === 'open');
-        if (task) { task.status = 'done'; await sendMessage(`✔️ *Задача выполнена* (#${task.id})\n_${task.text}_`); changed = true; }
-        else await sendMessage(`❌ Задача не найдена: _${arg}_`);
+        const doneIds = (parsed.command_args && parsed.command_args.length > 0)
+          ? parsed.command_args.map(Number)
+          : [parseInt(parsed.command_arg)].filter(n => !isNaN(n));
+        if (doneIds.length > 0) {
+          const completed = [];
+          const notFound = [];
+          for (const id of doneIds) {
+            const task = data.tasks.find(t => t.id === id && t.status === 'open');
+            if (task) { task.status = 'done'; completed.push(task); changed = true; }
+            else notFound.push(id);
+          }
+          if (completed.length > 0) {
+            const list = completed.map(t => `#${t.id} — _${t.text}_`).join('\n');
+            await sendMessage(`✔️ *Выполнено задач: ${completed.length}*\n${list}`);
+          }
+          if (notFound.length > 0) await sendMessage(`❌ Не найдены: ${notFound.map(id => '#'+id).join(', ')}`);
+        } else {
+          // Поиск по тексту
+          const arg = parsed.command_arg;
+          const task = data.tasks.find(t => t.text.toLowerCase().includes((arg || '').toLowerCase()) && t.status === 'open');
+          if (task) { task.status = 'done'; await sendMessage(`✔️ *Задача выполнена* (#${task.id})\n_${task.text}_`); changed = true; }
+          else await sendMessage(`❌ Задача не найдена: _${arg}_`);
+        }
         break;
       }
 
       case 'delete': {
-        const idx = data.tasks.findIndex(t => t.id === parseInt(parsed.command_arg));
-        if (idx !== -1) { const t = data.tasks.splice(idx, 1)[0]; await sendMessage(`🗑 *Задача удалена* (#${t.id})\n_${t.text}_`); changed = true; }
-        else await sendMessage(`❌ Задача #${parsed.command_arg} не найдена`);
+        // Поддержка массового удаления: command_args (массив) или command_arg (одиночный)
+        const deleteIds = (parsed.command_args && parsed.command_args.length > 0)
+          ? parsed.command_args.map(Number)
+          : [parseInt(parsed.command_arg)].filter(n => !isNaN(n));
+        const deleted = [];
+        const notFound = [];
+        for (const id of deleteIds) {
+          const idx = data.tasks.findIndex(t => t.id === id);
+          if (idx !== -1) { deleted.push(data.tasks.splice(idx, 1)[0]); changed = true; }
+          else notFound.push(id);
+        }
+        if (deleted.length > 0) {
+          const list = deleted.map(t => `#${t.id} — _${t.text}_`).join('\n');
+          await sendMessage(`🗑 *Удалено задач: ${deleted.length}*\n${list}`);
+        }
+        if (notFound.length > 0) await sendMessage(`❌ Не найдены: ${notFound.map(id => '#'+id).join(', ')}`);
         break;
       }
 
