@@ -246,7 +246,7 @@ async function parseWithGPT(text) {
 
 Правила:
 - tasks: перефразируй лаконично с глагола, разбей на отдельные если несколько
-- command: list=показать список, done=выполнено, delete=удалить, postpone=перенести дедлайн, pin=закрепить/обновить список
+- command: list=показать список, done=выполнено, delete=удалить, postpone=перенести дедлайн, pin=закрепить/обновить список, reminders_on=включить уведомления календаря, reminders_off=выключить уведомления календаря
 - command_args: если в команде несколько ID ("удали 1, 2, 3" или "готово 1 2 3") — заполни массив числами. Иначе пустой массив [].
 - unclear: цитата, пересланный текст, вопрос, разговор
 - Сегодня: ${new Date().toISOString().slice(0, 10)}`
@@ -426,6 +426,16 @@ async function processText(text, data) {
         else await sendMessage('❌ Не удалось обновить дедлайн');
         break;
       }
+
+      case 'reminders_on':
+        calendarRemindersEnabled = true;
+        await sendMessage('🔔 Уведомления о событиях *включены*');
+        break;
+
+      case 'reminders_off':
+        calendarRemindersEnabled = false;
+        await sendMessage('🔕 Уведомления о событиях *выключены*');
+        break;
 
       case 'pin':
         await updatePinnedList(data);
@@ -687,3 +697,40 @@ app.get('/', (req, res) => res.json({ status: 'ok' }));
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Bot running on port ${PORT}`));
+
+// ─── Напоминания о событиях каждые 15 мин ────────────────────────
+let calendarRemindersEnabled = true;
+
+setInterval(async () => {
+  if (!calendarRemindersEnabled) return;
+  try {
+    const calendar = getCalendarClient();
+    const now = new Date();
+    const in10 = new Date(now.getTime() + 10 * 60 * 1000);
+    const in20 = new Date(now.getTime() + 20 * 60 * 1000);
+
+    const response = await calendar.events.list({
+      calendarId: CALENDAR_ID,
+      timeMin: in10.toISOString(),
+      timeMax: in20.toISOString(),
+      singleEvents: true,
+      orderBy: 'startTime'
+    });
+
+    const events = response.data.items || [];
+    for (const event of events) {
+      const start = event.start.dateTime || event.start.date;
+      const startDate = new Date(start);
+      const timeStr = startDate.toLocaleTimeString('ru-RU', { timeZone: 'Europe/Moscow', hour: '2-digit', minute: '2-digit' });
+      let msg = `🔔 *Через 15 минут:* ${event.summary}\n🕐 ${timeStr}`;
+      if (event.location) msg += `\n📍 ${event.location}`;
+      if (event.attendees && event.attendees.length > 1) {
+        const others = event.attendees.filter(a => a.email !== CALENDAR_ID).map(a => a.displayName || a.email);
+        if (others.length > 0) msg += `\n👥 ${others.join(', ')}`;
+      }
+      await sendMessage(msg);
+    }
+  } catch (e) {
+    console.error('Calendar reminder error:', e.message);
+  }
+}, 15 * 60 * 1000);
