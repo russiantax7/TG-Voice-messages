@@ -519,13 +519,18 @@ app.post('/webhook', async (req, res) => {
         const username = from.username ? `@${from.username}` : 'без ника';
         const fullName = [from.first_name, from.last_name].filter(Boolean).join(' ') || 'Неизвестно';
 
-        // Приветствие пользователю
-        await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
-          chat_id: chatId,
-          text: `Здравствуйте! Мы шагаем в ногу со временем и приветствуем персональный неординарный подход во всём. Опишите текстом или голосовым Ваш запрос и с Вами свяжется самый подходящий эксперт из нашей команды.
+        // Приветствие — первое сообщение (message_id=1) или /start
+        const isFirstMessage = msg.message_id === 1 || (msg.text && msg.text.startsWith('/start'));
+        const replyText = isFirstMessage
+          ? `Здравствуйте! Мы шагаем в ногу со временем и приветствуем персональный неординарный подход во всём. Опишите текстом или голосовым Ваш запрос и с Вами свяжется самый подходящий эксперт из нашей команды.
 
 С уважением,
 управляющий партнёр Гуськов Александр вместе с Guskov & Associates AI`
+          : `Спасибо, получено. Вернёмся в ближайшее время.`;
+
+        await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+          chat_id: chatId,
+          text: replyText
         });
 
         // Уведомление владельцу и в GALP Tax
