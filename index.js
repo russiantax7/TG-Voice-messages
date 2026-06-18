@@ -642,6 +642,42 @@ app.post('/summary', async (req, res) => {
   }
 });
 
+
+// ─── /check-events — проверка предстоящих событий (для cron каждые 15 мин) ───
+app.get('/check-events', async (req, res) => {
+  res.json({ status: 'started' });
+  try {
+    const calendar = getCalendarClient();
+    const now = new Date();
+    const in10 = new Date(now.getTime() + 10 * 60 * 1000);
+    const in20 = new Date(now.getTime() + 20 * 60 * 1000);
+
+    const response = await calendar.events.list({
+      calendarId: CALENDAR_ID,
+      timeMin: in10.toISOString(),
+      timeMax: in20.toISOString(),
+      singleEvents: true,
+      orderBy: 'startTime'
+    });
+
+    const events = response.data.items || [];
+    for (const event of events) {
+      const start = event.start.dateTime || event.start.date;
+      const startDate = new Date(start);
+      const timeStr = startDate.toLocaleTimeString('ru-RU', { timeZone: 'Europe/Moscow', hour: '2-digit', minute: '2-digit' });
+      let msg = `🔔 *Через 15 минут:* ${event.summary}\n🕐 ${timeStr}`;
+      if (event.location) msg += `\n📍 ${event.location}`;
+      if (event.attendees && event.attendees.length > 1) {
+        const others = event.attendees.filter(a => a.email !== CALENDAR_ID).map(a => a.displayName || a.email);
+        if (others.length > 0) msg += `\n👥 ${others.join(', ')}`;
+      }
+      await sendMessage(msg);
+    }
+  } catch (e) {
+    console.error('check-events error:', e.message);
+  }
+});
+
 app.get('/messages', (req, res) => {
   const messages = loadMessages();
   res.json(messages.slice(-50));
