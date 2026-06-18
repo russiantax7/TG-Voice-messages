@@ -504,7 +504,45 @@ app.post('/webhook', async (req, res) => {
     }
 
     // Личка с владельцем — таск-менеджер
-    if (chatId !== OWNER_CHAT_ID) return;
+    // Новый пользователь (не владелец и не рабочий чат) — лидогенерация
+    if (chatId !== OWNER_CHAT_ID) {
+      try {
+        let userText = msg.text || msg.caption || null;
+        // Если голосовое — расшифровываем
+        if (!userText && (msg.voice || msg.audio)) {
+          const buffer = await downloadVoice((msg.voice || msg.audio).file_id);
+          userText = await transcribeAudio(buffer);
+        }
+        if (!userText) return;
+
+        const from = msg.from || {};
+        const username = from.username ? `@${from.username}` : 'без ника';
+        const fullName = [from.first_name, from.last_name].filter(Boolean).join(' ') || 'Неизвестно';
+
+        // Приветствие пользователю
+        await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+          chat_id: chatId,
+          text: `Здравствуйте! Мы шагаем в ногу со временем и приветствуем персональный неординарный подход во всём. Опишите текстом или голосовым Ваш запрос и с Вами свяжется самый подходящий эксперт из нашей команды.
+
+С уважением,
+управляющий партнёр Гуськов Александр вместе с Guskov & Associates AI`
+        });
+
+        // Уведомление владельцу и в GALP Tax
+        const notify = `📩 *Новое сообщение с сайта galp.ru*
+От: ${username} (${fullName})
+Текст: _"${userText}"_`;
+        await sendMessage(notify); // владельцу в личку
+        await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+          chat_id: -462206422, // GALP Tax
+          text: notify,
+          parse_mode: 'Markdown'
+        });
+      } catch (e) {
+        console.error('Lead handler error:', e.message);
+      }
+      return;
+    }
 
     const data = loadTasks();
     let text = null;
