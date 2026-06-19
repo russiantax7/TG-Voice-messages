@@ -7,6 +7,27 @@ const { google } = require('googleapis');
 // ─── Google Calendar ──────────────────────────────────────────────
 const CALENDAR_ID = 'aguskov@galp.ru';
 const SUMMARY_HOUR = 20; // Час отправки резюме (МСК) — менять только здесь
+
+// ─── Справочник контактов ─────────────────────────────────────────
+const CONTACTS = [
+  { email: 'mkharitidi@galp.ru',      names: ['харитиди', 'марина харитиди', 'марина'] },
+  { email: 'ykan@galp.ru',            names: ['кан', 'юлиана кан', 'юлиана'] },
+  { email: 'iguskov@galp.ru',         names: ['игорь гуськов', 'игорь', 'гуськов игорь'] },
+  { email: 'gknyazeva@galp.ru',       names: ['князева', 'галина князева', 'галина', 'галя'] },
+  { email: 'okostrukova@galp.ru',     names: ['кострюкова', 'оксана кострюкова', 'оксана'] },
+  { email: 'sofiaguskova537@gmail.com', names: ['софия', 'софик', 'соня', 'дочь', 'дочка', 'дочки', 'гускова'] },
+];
+
+function resolveAttendees(text) {
+  const lower = text.toLowerCase();
+  const found = [];
+  for (const contact of CONTACTS) {
+    if (contact.names.some(n => lower.includes(n))) {
+      if (!found.includes(contact.email)) found.push(contact.email);
+    }
+  }
+  return found;
+}
 const GOOGLE_CREDENTIALS = JSON.parse(process.env.GOOGLE_CREDENTIALS || '{}');
 
 function getCalendarClient() {
@@ -591,7 +612,11 @@ app.post('/webhook', async (req, res) => {
             const fmtDate = (s) => { const [dp,tp] = s.split('T'); const [,m,d] = dp.split('-'); const [hh,mm] = tp.split(':'); return `${d}.${m} ${hh}:${mm}`; };
 
             if (action === 'create') {
-              const created = await createCalendarEvent(parsed.summary, parsed.start, parsed.end, '', tz, parsed.location, parsed.attendees);
+              // Объединяем attendees от GPT + из справочника по именам в тексте
+              const resolvedEmails = resolveAttendees(normalizedText);
+              const gptEmails = (parsed.attendees || []);
+              const allAttendees = [...new Set([...gptEmails, ...resolvedEmails])];
+              const created = await createCalendarEvent(parsed.summary, parsed.start, parsed.end, '', tz, parsed.location, allAttendees);
               const events = loadEvents();
               events.push({ id: created.id, summary: parsed.summary, start: parsed.start });
               saveEvents(events);
@@ -615,7 +640,9 @@ app.post('/webhook', async (req, res) => {
                 saveEvents(events.filter(e => e.id !== found.id));
                 await sendMessage(`🗑 Событие удалено:\n*${found.summary}*`);
               } else {
-                await updateCalendarEvent(found.id, found.summary, parsed.start, parsed.end, tz, parsed.location, parsed.attendees);
+                const resolvedEmailsUpd = resolveAttendees(normalizedText);
+                const allAttendeesUpd = [...new Set([...(parsed.attendees || []), ...resolvedEmailsUpd])];
+                await updateCalendarEvent(found.id, found.summary, parsed.start, parsed.end, tz, parsed.location, allAttendeesUpd);
                 saveEvents(events.map(e => e.id === found.id ? { ...e, start: parsed.start } : e));
                 let updateMsg = `📅 Событие обновлено:\n*${found.summary}*\n${fmtDate(parsed.start)} (${tzLabel})`;
                 if (parsed.location) updateMsg += `\n📍 ${parsed.location}`;
