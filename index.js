@@ -562,7 +562,7 @@ app.post('/webhook', async (req, res) => {
 
     if (text) {
       // Сообщение для помощницы — переслать в PA Shindyaeva
-      const assistantMatch = text.match(/^(?:анастасии|для помощницы|напиши анастасии|помощнице)[:\s]+(.+)/is);
+      const assistantMatch = text.match(/^(?:анастасии|для помощницы|напиши анастасии|помощнице)[:.\s]+(.+)/is);
       if (assistantMatch) {
         const msgForAssistant = assistantMatch[1].trim();
         await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
