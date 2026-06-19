@@ -579,7 +579,11 @@ app.post('/webhook', async (req, res) => {
       const calKeywords = /запиши на|запишь|назначь|добавь в календар|в календар|создай встреч|запланируй|запланиров|созвон на|встреча в пятн|встреча в пон|встреча в вт|встреча в ср|встреча в чет|встреча в суб|встреча в вос|встреча завтра|встреча сегодня|ужин в|обед в|поездка в|перенеси|перенес|измени|измень|измени название|переименуй|переименова|сдвинь|сдвин|удали встреч|удали событи|отмени|отмень|удали событ|удали встреч|убери событ|убери встреч|в календаре|событие в|событие на/i;
       if (calKeywords.test(text)) {
         try {
-          const parsed = await parseCalendarEvent(text);
+          // Нормализация: Whisper иногда пишет "собачка" вместо "@"
+          const normalizedText = text
+            .replace(/собачка([а-яёa-z0-9._-]+\.[а-яёa-z]{2,})/gi, '@$1')
+            .replace(/собачка/gi, '@');
+          const parsed = await parseCalendarEvent(normalizedText);
           if (parsed.is_event) {
             const tz = parsed.timezone || 'Europe/Moscow';
             const action = parsed.action || 'create';
