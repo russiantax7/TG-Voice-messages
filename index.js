@@ -743,6 +743,7 @@ app.listen(PORT, () => console.log(`Bot running on port ${PORT}`));
 
 // ─── Напоминания о событиях каждые 15 мин ────────────────────────
 let calendarRemindersEnabled = true;
+const sentReminders = new Set(); // eventId → уже отправлено
 
 setInterval(async () => {
   if (!calendarRemindersEnabled) return;
@@ -762,6 +763,14 @@ setInterval(async () => {
 
     const events = response.data.items || [];
     for (const event of events) {
+      // Ключ = eventId + дата начала — чтобы не слать дважды про одно событие
+      const key = `${event.id}_${event.start.dateTime || event.start.date}`;
+      if (sentReminders.has(key)) continue;
+      sentReminders.add(key);
+
+      // Чистим старые ключи (старше 2 часов)
+      if (sentReminders.size > 100) sentReminders.clear();
+
       const start = event.start.dateTime || event.start.date;
       const startDate = new Date(start);
       const timeStr = startDate.toLocaleTimeString('ru-RU', { timeZone: 'Europe/Moscow', hour: '2-digit', minute: '2-digit' });
