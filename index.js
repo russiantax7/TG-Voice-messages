@@ -904,7 +904,8 @@ app.post('/weekly-review', async (req, res) => {
       ]
     }, { headers: { Authorization: `Bearer ${OPENAI_API_KEY}` } });
 
-    await sendMessage(`📊 *Еженедельный отчёт по команде — ${dateStr}*\n\n${r.data.choices[0].message.content}`);
+    const schedule = `\n\n─────────────────\n📆 *График отчётов GALP:*\n• Резюме рабочих чатов — пн–пт, 20:00 МСК\n• Резюме чата с Анастасией — пн–пт, 20:00 МСК\n• Оценка команды — каждую пятницу, 20:00 МСК`;
+    await sendMessage(`📊 *Еженедельный отчёт по команде — ${dateStr}*\n\n${r.data.choices[0].message.content}${schedule}`);
   } catch (e) {
     console.error('Weekly review error:', e.message);
     await sendMessage('⚠️ Ошибка при формировании еженедельного отчёта.');
