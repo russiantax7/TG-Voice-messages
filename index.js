@@ -109,6 +109,7 @@ const TASKS_FILE = '/data/tasks.json';
 const MESSAGES_FILE = '/data/messages.json';
 const EVENTS_FILE = '/data/events.json';
 const ARCHIVE_FILE = '/data/archive.json'; // Хранится 1 год
+const REPORT_STATE_FILE = '/data/report_state.json'; // last_run для каждого отчёта
 
 // Известные рабочие чаты
 const WORK_CHATS_DEFAULT = [-462206422, -788559454, -5570418094, -5161080891, -5077349043];
@@ -178,6 +179,19 @@ function loadMessages() {
 
 function saveMessages(messages) {
   try { fs.writeFileSync(MESSAGES_FILE, JSON.stringify(messages, null, 2)); } catch (e) {}
+}
+
+// ─── Report state (last_run per report) ──────────────────────────────────
+function loadReportState() {
+  try { return JSON.parse(fs.readFileSync(REPORT_STATE_FILE, 'utf8')); } catch { return {}; }
+}
+function getReportLastRun(key) {
+  return loadReportState()[key] || null; // Unix timestamp (seconds) or null
+}
+function setReportLastRun(key) {
+  const state = loadReportState();
+  state[key] = Math.floor(Date.now() / 1000);
+  try { fs.writeFileSync(REPORT_STATE_FILE, JSON.stringify(state, null, 2)); } catch (e) {}
 }
 
 function appendToArchive(entry) {
@@ -739,14 +753,17 @@ app.post('/summary', async (req, res) => {
     const messages = loadMessages();
     const nowMSK = new Date(Date.now() + 3 * 3600 * 1000);
 
-    // Окно: с 20:00 предыдущего рабочего дня до сейчас
-    // В понедельник — с 20:00 пятницы
-    const dayOfWeek = nowMSK.getDay(); // 0=вс, 1=пн, ..., 5=пт, 6=сб
-    const daysBack = dayOfWeek === 1 ? 3 : 1; // пн → 3 дня назад (пт), иначе 1 день
-    const prevDay = new Date(nowMSK);
-    prevDay.setDate(prevDay.getDate() - daysBack);
-    prevDay.setHours(SUMMARY_HOUR, 0, 0, 0);
-    const startTimestamp = (prevDay.getTime() - 3 * 3600 * 1000) / 1000;
+    // Окно: с предыдущего запуска (либо fallback: 20:00 предыдущего рабдня)
+    let startTimestamp = getReportLastRun('summary');
+    if (!startTimestamp) {
+      const dayOfWeek = nowMSK.getDay();
+      const daysBack = dayOfWeek === 1 ? 3 : 1;
+      const prevDay = new Date(nowMSK);
+      prevDay.setDate(prevDay.getDate() - daysBack);
+      prevDay.setHours(SUMMARY_HOUR, 0, 0, 0);
+      startTimestamp = (prevDay.getTime() - 3 * 3600 * 1000) / 1000;
+    }
+    setReportLastRun('summary');
     const todayMsgs = messages.filter(m => m.date >= startTimestamp);
     const dateStr = nowMSK.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric' });
 
@@ -828,12 +845,18 @@ app.post('/summary-pa', async (req, res) => {
   try {
     const messages = loadMessages();
     const nowMSK = new Date(Date.now() + 3 * 3600 * 1000);
-    const dayOfWeek = nowMSK.getDay();
-    const daysBack = dayOfWeek === 1 ? 3 : 1;
-    const prevDay = new Date(nowMSK);
-    prevDay.setDate(prevDay.getDate() - daysBack);
-    prevDay.setHours(21, 0, 0, 0); // окно с 21:00 предыдущего дня
-    const startTimestamp = (prevDay.getTime() - 3 * 3600 * 1000) / 1000;
+
+    // Окно: с предыдущего запуска (либо fallback: 21:00 предыдущего рабдня)
+    let startTimestamp = getReportLastRun('summary-pa');
+    if (!startTimestamp) {
+      const dayOfWeek = nowMSK.getDay();
+      const daysBack = dayOfWeek === 1 ? 3 : 1;
+      const prevDay = new Date(nowMSK);
+      prevDay.setDate(prevDay.getDate() - daysBack);
+      prevDay.setHours(21, 0, 0, 0);
+      startTimestamp = (prevDay.getTime() - 3 * 3600 * 1000) / 1000;
+    }
+    setReportLastRun('summary-pa');
     const todayMsgs = messages.filter(m => m.date >= startTimestamp);
     const dateStr = nowMSK.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric' });
     const paMsgs = todayMsgs.filter(m => m.chat_name === 'PA Shindyaeva');
