@@ -526,7 +526,8 @@ app.post('/webhook', async (req, res) => {
 
     // Личка с владельцем — таск-менеджер
     // Новый пользователь (не владелец и не рабочий чат) — лидогенерация
-    if (chatId !== OWNER_CHAT_ID) {
+    // Только личные чаты (private) — группы игнорируем
+    if (chatId !== OWNER_CHAT_ID && msg.chat.type === 'private') {
       try {
         let userText = msg.text || msg.caption || null;
         // Если голосовое — расшифровываем
