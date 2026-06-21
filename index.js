@@ -108,6 +108,7 @@ const TG_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
 const TASKS_FILE = '/data/tasks.json';
 const MESSAGES_FILE = '/data/messages.json';
 const EVENTS_FILE = '/data/events.json';
+const ARCHIVE_FILE = '/data/archive.json'; // Хранится 1 год
 
 // Известные рабочие чаты
 const WORK_CHATS_DEFAULT = [-462206422, -788559454, -5570418094, -5161080891, -5077349043];
@@ -179,21 +180,35 @@ function saveMessages(messages) {
   try { fs.writeFileSync(MESSAGES_FILE, JSON.stringify(messages, null, 2)); } catch (e) {}
 }
 
+function appendToArchive(entry) {
+  try {
+    let archive = [];
+    try { archive = JSON.parse(fs.readFileSync(ARCHIVE_FILE, 'utf8')); } catch {}
+    archive.push(entry);
+    // Храним 1 год
+    const cutoff = Date.now() / 1000 - 365 * 24 * 3600;
+    fs.writeFileSync(ARCHIVE_FILE, JSON.stringify(archive.filter(m => m.date > cutoff), null, 2));
+  } catch (e) { console.error('appendToArchive error:', e.message); }
+}
+
 function storeGroupMessage(msg) {
   const messages = loadMessages();
   const chatId = msg.chat.id;
   const from = msg.from?.first_name || msg.from?.username || 'Unknown';
   const text = msg.text || msg.caption || '[медиа]';
-  messages.push({
+  const entry = {
     chat_id: chatId,
     chat_name: CHAT_NAMES[String(chatId)] || String(chatId),
     from,
     text,
     date: msg.date
-  });
-  // Храним только последние 7 дней
+  };
+  messages.push(entry);
+  // Храним только последние 7 дней в messages.json
   const cutoff = Date.now() / 1000 - 7 * 24 * 3600;
   saveMessages(messages.filter(m => m.date > cutoff));
+  // Дополнительно сохраняем в архив (1 год)
+  appendToArchive(entry);
 }
 
 // ─── Pinned list ──────────────────────────────────────────────────
@@ -843,6 +858,56 @@ app.get('/check-events', async (req, res) => {
     }
   } catch (e) {
     console.error('check-events error:', e.message);
+  }
+});
+
+// ─── /weekly-review — еженедельная оценка сотрудников ───────────
+app.post('/weekly-review', async (req, res) => {
+  res.json({ status: 'started' });
+  try {
+    let archive = [];
+    try { archive = JSON.parse(fs.readFileSync(ARCHIVE_FILE, 'utf8')); } catch {}
+
+    // Сообщения за последние 7 дней
+    const weekAgo = Date.now() / 1000 - 7 * 24 * 3600;
+    const weekMsgs = archive.filter(m => m.date > weekAgo);
+
+    if (weekMsgs.length === 0) {
+      await sendMessage('📊 Еженедельный отчёт: недостаточно данных за неделю.');
+      return;
+    }
+
+    const dateStr = new Date().toLocaleDateString('ru-RU', { timeZone: 'Europe/Moscow', day: '2-digit', month: '2-digit', year: 'numeric' });
+    const text = weekMsgs.map(m => `[${new Date(m.date * 1000).toLocaleDateString('ru-RU', {timeZone:'Europe/Moscow', day:'2-digit', month:'2-digit'})} ${m.chat_name}] ${m.from}: ${m.text}`).join('\n');
+
+    const r = await axios.post('https://api.openai.com/v1/chat/completions', {
+      model: 'gpt-4o',
+      messages: [
+        { role: 'system', content: `Ты HR-аналитик в компании которая занимается налогами, регистрацией компаний за рубежом и юридическими задачами для состоятельных бенефициаров. Проанализируй переписку за неделю и дай оценку работы каждого сотрудника. Александр (Alexander) — владелец, его не оцениваем.
+
+Формат:
+*📊 Еженедельная оценка команды*
+
+По каждому сотруднику (кто есть в переписке):
+*Имя сотрудника*
+⚡️ Скорость: насколько быстро отвечает на вопросы и задачи
+✅ Качество: насколько полно и точно выполняет задачи
+🔁 Надёжность: забытые задачи, потерянные вопросы, не отвеченные сообщения
+💬 Коммуникация: инициативность, качество объяснений, предупреждает ли о проблемах
+⭐️ Итог: краткий вывод одним предложением
+
+*💡 Общий вывод по команде за неделю*
+— что работает хорошо, что стоит улучшить
+
+Правила: оценивай только по фактам из переписки. Не додумывай. Если данных по сотруднику мало — так и напиши. Пиши на русском, конкретно и по делу.` },
+        { role: 'user', content: text }
+      ]
+    }, { headers: { Authorization: `Bearer ${OPENAI_API_KEY}` } });
+
+    await sendMessage(`📊 *Еженедельный отчёт по команде — ${dateStr}*\n\n${r.data.choices[0].message.content}`);
+  } catch (e) {
+    console.error('Weekly review error:', e.message);
+    await sendMessage('⚠️ Ошибка при формировании еженедельного отчёта.');
   }
 });
 
