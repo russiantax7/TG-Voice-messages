@@ -110,7 +110,22 @@ const MESSAGES_FILE = '/data/messages.json';
 const EVENTS_FILE = '/data/events.json';
 
 // Известные рабочие чаты
-const WORK_CHATS = new Set([-462206422, -788559454, -5570418094, -5161080891, -5077349043]);
+const WORK_CHATS_DEFAULT = [-462206422, -788559454, -5570418094, -5161080891, -5077349043];
+const WORK_CHATS_FILE = '/data/work_chats.json';
+
+function loadWorkChats() {
+  try {
+    const data = JSON.parse(fs.readFileSync(WORK_CHATS_FILE, 'utf8'));
+    return new Set(data);
+  } catch {
+    return new Set(WORK_CHATS_DEFAULT);
+  }
+}
+function saveWorkChats(set) {
+  fs.writeFileSync(WORK_CHATS_FILE, JSON.stringify([...set]));
+}
+
+WORK_CHATS = loadWorkChats();
 const CHAT_NAMES = {
   '-462206422': 'GALP Tax',
   '-788559454': 'GALP Incorporation',
@@ -492,6 +507,29 @@ app.post('/webhook', async (req, res) => {
   res.sendStatus(200);
   try {
     const update = req.body;
+    // Бота добавили в новую группу — автоматически добавляем в WORK_CHATS
+    if (update.my_chat_member) {
+      const member = update.my_chat_member;
+      const chat = member.chat;
+      const newStatus = member.new_chat_member?.status;
+      if ((chat.type === 'group' || chat.type === 'supergroup') && newStatus === 'member' || newStatus === 'administrator') {
+        if (!WORK_CHATS.has(chat.id)) {
+          WORK_CHATS.add(chat.id);
+          saveWorkChats(WORK_CHATS);
+          await sendMessage(`✅ Группа *${chat.title}* (${chat.id}) добавлена в список для резюме.`);
+        }
+      }
+      // Бота удалили из группы
+      if (newStatus === 'left' || newStatus === 'kicked') {
+        if (WORK_CHATS.has(chat.id)) {
+          WORK_CHATS.delete(chat.id);
+          saveWorkChats(WORK_CHATS);
+          await sendMessage(`❌ Группа *${chat.title}* удалена из списка резюме (бот удалён).`);
+        }
+      }
+      return res.sendStatus(200);
+    }
+
     const msg = update.message || update.edited_message;
     if (!msg) return;
 
