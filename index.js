@@ -814,14 +814,46 @@ app.post('/summary', async (req, res) => {
       await sendMessage(`📋 *${title} — ${dateStr}*\n\n${r.data.choices[0].message.content}`);
     };
 
-    const paMsgs = todayMsgs.filter(m => m.chat_name === 'PA Shindyaeva');
     const otherMsgs = todayMsgs.filter(m => m.chat_name !== 'PA Shindyaeva');
-
-    await makeSummary(paMsgs, 'Резюме: PA Shindyaeva');
     await makeSummary(otherMsgs, 'Резюме: Рабочие чаты');
   } catch (e) {
     console.error('/summary error:', e.message);
     await sendMessage('⚠️ Ошибка при формировании резюме дня.');
+  }
+});
+
+// ─── /summary-pa — резюме чата с Анастасией (21:00 МСК) ─────────
+app.post('/summary-pa', async (req, res) => {
+  res.json({ status: 'started' });
+  try {
+    const messages = loadMessages();
+    const nowMSK = new Date(Date.now() + 3 * 3600 * 1000);
+    const dayOfWeek = nowMSK.getDay();
+    const daysBack = dayOfWeek === 1 ? 3 : 1;
+    const prevDay = new Date(nowMSK);
+    prevDay.setDate(prevDay.getDate() - daysBack);
+    prevDay.setHours(21, 0, 0, 0); // окно с 21:00 предыдущего дня
+    const startTimestamp = (prevDay.getTime() - 3 * 3600 * 1000) / 1000;
+    const todayMsgs = messages.filter(m => m.date >= startTimestamp);
+    const dateStr = nowMSK.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric' });
+    const paMsgs = todayMsgs.filter(m => m.chat_name === 'PA Shindyaeva');
+
+    if (paMsgs.length === 0) {
+      await sendMessage(`📋 *Резюме: PA Shindyaeva — ${dateStr}*\n\nСообщений сегодня не было.`);
+      return;
+    }
+    const text = paMsgs.map(m => `[${m.chat_name}] ${m.from}: ${m.text}`).join('\n');
+    const r = await axios.post('https://api.openai.com/v1/chat/completions', {
+      model: 'gpt-4o',
+      messages: [
+        { role: 'system', content: `Ты бизнес-аналитик. Анализируй переписку между Alexander и его личным ассистентом Анастасией. Имена бери из поля from.\n\nФормат:\n*🗣 Вопросы и обсуждения*\n— что спрашивал Alexander, какие ответы получил\n\n*📋 Статус задач*\n— задача — статус (выполнена / в работе / не начата)\n\n*✅ Что сделано*\n— что Анастасия выполнила или подтвердила сегодня\n\n*⏳ В работе*\n— что ещё не закрыто, дедлайн если есть\n\n*❗️ Требует внимания*\n— что зависло, не получило ответа или требует решения Alexander\n\n*📎 Список задач от Анастасии*\n— если она прислала свой вечерний список — воспроизведи полностью\n\nПравила: пустые разделы пропускай. Не додумывай. Задача выполнена если есть подтверждение («готово», «сделал», «отправил»). Пиши на русском, кратко и по делу. Используй Markdown (*, —).` },
+        { role: 'user', content: text }
+      ]
+    }, { headers: { Authorization: `Bearer ${OPENAI_API_KEY}` } });
+    await sendMessage(`📋 *Резюме: PA Shindyaeva — ${dateStr}*\n\n${r.data.choices[0].message.content}`);
+  } catch (e) {
+    console.error('/summary-pa error:', e.message);
+    await sendMessage('⚠️ Ошибка при формировании резюме PA.');
   }
 });
 
@@ -904,7 +936,7 @@ app.post('/weekly-review', async (req, res) => {
       ]
     }, { headers: { Authorization: `Bearer ${OPENAI_API_KEY}` } });
 
-    const schedule = `\n\n─────────────────\n📆 *График отчётов GALP:*\n• Резюме рабочих чатов — пн–пт, 20:00 МСК\n• Резюме чата с Анастасией — пн–пт, 20:00 МСК\n• Оценка команды — каждую пятницу, 20:00 МСК`;
+    const schedule = `\n\n─────────────────\n📆 *График отчётов GALP:*\n• Резюме рабочих чатов — пн–пт, 20:00 МСК\n• Резюме чата с Анастасией — пн–пт, 21:00 МСК\n• Оценка команды — каждую пятницу, 20:00 МСК`;
     await sendMessage(`📊 *Еженедельный отчёт по команде — ${dateStr}*\n\n${r.data.choices[0].message.content}${schedule}`);
   } catch (e) {
     console.error('Weekly review error:', e.message);
