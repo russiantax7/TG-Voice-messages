@@ -210,12 +210,17 @@ function storeGroupMessage(msg) {
   const chatId = msg.chat.id;
   const from = msg.from?.first_name || msg.from?.username || 'Unknown';
   const text = msg.text || msg.caption || '[медиа]';
+  // Формируем ссылку на сообщение (t.me/c/CHAT_ID/MSG_ID)
+  // chat_id у супергрупп начинается с -100, отбрасываем префикс для ссылки
+  const peerIdForLink = String(chatId).replace(/^-100/, '');
+  const msgLink = `https://t.me/c/${peerIdForLink}/${msg.message_id}`;
   const entry = {
     chat_id: chatId,
     chat_name: CHAT_NAMES[String(chatId)] || String(chatId),
     from,
     text,
-    date: msg.date
+    date: msg.date,
+    link: msgLink
   };
   messages.push(entry);
   // Храним только последние 7 дней в messages.json
@@ -772,7 +777,7 @@ app.post('/summary', async (req, res) => {
         await sendMessage(`📋 *${title} — ${dateStr}*\n\nСообщений сегодня не было.`);
         return;
       }
-      const text = msgs.map(m => `[${m.chat_name}] ${m.from}: ${m.text}`).join('\n');
+      const text = msgs.map(m => `[${m.chat_name}] [${m.from}] [link:${m.link || ''}]: ${m.text}`).join('\n');
 
       const isPA = title.includes('Shindyaeva');
       const systemPrompt = isPA
@@ -821,7 +826,7 @@ app.post('/summary', async (req, res) => {
 
 Правила: пустые разделы пропускай. Не додумывай — только то что есть в переписке. Задача считается поставленной если кто-то явно просит что-то сделать. Задача считается выполненной если есть подтверждение («готово», «сделал», «отправил»). Пиши на русском, кратко и по делу. Используй Markdown (*, —).
 
-Цитаты: для ключевых фраз, решений и поручений добавляй дословную цитату в формате: > «текст» — Имя`;
+Ссылки: для ключевых фраз, решений и поручений добавляй кликабельную ссылку на сообщение в формате Markdown: [Имя](link), где link — значение поля link: данного сообщения. Если link пустой — не добавляй ссылку.`;
 
       const r = await axios.post('https://api.openai.com/v1/chat/completions', {
         model: 'gpt-4o',
@@ -867,13 +872,13 @@ app.post('/summary-pa', async (req, res) => {
       await sendMessage(`📋 *Резюме: PA Shindyaeva — ${dateStr}*\n\nСообщений сегодня не было.`);
       return;
     }
-    const text = paMsgs.map(m => `[${m.chat_name}] ${m.from}: ${m.text}`).join('\n');
+    const text = paMsgs.map(m => `[${m.chat_name}] [${m.from}] [link:${m.link || ''}]: ${m.text}`).join('\n');
     const r = await axios.post('https://api.openai.com/v1/chat/completions', {
       model: 'gpt-4o',
       messages: [
         { role: 'system', content: `Ты бизнес-аналитик. Анализируй переписку между Alexander и его личным ассистентом Анастасией. Имена бери из поля from.\n\nФормат:\n*🗣 Вопросы и обсуждения*\n— что спрашивал Alexander, какие ответы получил\n\n*📋 Статус задач*\n— задача — статус (выполнена / в работе / не начата)\n\n*✅ Что сделано*\n— что Анастасия выполнила или подтвердила сегодня\n\n*⏳ В работе*\n— что ещё не закрыто, дедлайн если есть\n\n*❗️ Требует внимания*\n— что зависло, не получило ответа или требует решения Alexander\n\n*📎 Список задач от Анастасии*\n— если она прислала свой вечерний список — воспроизведи полностью\n\nПравила: пустые разделы пропускай. Не додумывай. Задача выполнена если есть подтверждение («готово», «сделал», «отправил»). Пиши на русском, кратко и по делу. Используй Markdown (*, —).
 
-Цитаты: для ключевых фраз, решений и поручений добавляй дословную цитату в формате: > «текст» — Имя` },
+Ссылки: для ключевых фраз, решений и поручений добавляй кликабельную ссылку на сообщение в формате Markdown: [Имя](link), где link — значение поля link: данного сообщения. Если link пустой — не добавляй ссылку.` },
         { role: 'user', content: text }
       ]
     }, { headers: { Authorization: `Bearer ${OPENAI_API_KEY}` } });
