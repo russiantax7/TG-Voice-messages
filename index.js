@@ -699,7 +699,13 @@ app.post('/webhook', async (req, res) => {
               saveEvents(events);
               let confirmMsg = `📅 Событие добавлено в календарь:\n*${parsed.summary}*\n${fmtDate(parsed.start)} (${tzLabel})`;
               if (parsed.location) confirmMsg += `\n📍 ${parsed.location}`;
-              if (parsed.attendees && parsed.attendees.length > 0) confirmMsg += `\n👥 ${parsed.attendees.join(', ')}`;
+              if (allAttendees.length > 0) {
+                const guestList = allAttendees.map(email => {
+                  const contact = CONTACTS.find(c => c.email === email);
+                  return contact ? `${contact.names[0]} (${email})` : email;
+                });
+                confirmMsg += `\n👥 Гости: ${guestList.join(', ')}`;
+              }
               await sendMessage(confirmMsg);
               return;
             }
@@ -707,7 +713,13 @@ app.post('/webhook', async (req, res) => {
             if (action === 'delete' || action === 'update') {
               const events = loadEvents();
               const q = (parsed.search_query || parsed.summary || '').toLowerCase();
-              const found = events.find(e => e.summary.toLowerCase().includes(q) || q.split(' ').some(w => w.length > 2 && e.summary.toLowerCase().includes(w)));
+              const words = q.split(/\s+/).filter(w => w.length > 2);
+              // Сначала ищем точное вхождение, потом по всем словам, потом по любому слову
+              const found =
+                events.find(e => e.summary.toLowerCase() === q) ||
+                events.find(e => e.summary.toLowerCase().includes(q)) ||
+                events.find(e => words.every(w => e.summary.toLowerCase().includes(w))) ||
+                events.find(e => words.some(w => e.summary.toLowerCase().includes(w)));
               if (!found) {
                 await sendMessage(`❓ Не нашёл событие: _${parsed.search_query || parsed.summary}_\nПопробуй уточнить название.`);
                 return;
@@ -721,9 +733,17 @@ app.post('/webhook', async (req, res) => {
                 const allAttendeesUpd = [...new Set([...(parsed.attendees || []), ...resolvedEmailsUpd])];
                 await updateCalendarEvent(found.id, found.summary, parsed.start, parsed.end, tz, parsed.location, allAttendeesUpd);
                 saveEvents(events.map(e => e.id === found.id ? { ...e, start: parsed.start } : e));
-                let updateMsg = `📅 Событие обновлено:\n*${found.summary}*\n${fmtDate(parsed.start)} (${tzLabel})`;
+                let updateMsg = `📅 Событие обновлено:\n*${found.summary}*`;
+                if (parsed.start) updateMsg += `\n⏰ ${fmtDate(parsed.start)} (${tzLabel})`;
                 if (parsed.location) updateMsg += `\n📍 ${parsed.location}`;
-                if (parsed.attendees && parsed.attendees.length > 0) updateMsg += `\n👥 ${parsed.attendees.join(', ')}`;
+                if (allAttendeesUpd.length > 0) {
+                  // Показываем имя + email для каждого гостя
+                  const guestList = allAttendeesUpd.map(email => {
+                    const contact = CONTACTS.find(c => c.email === email);
+                    return contact ? `${contact.names[0]} (${email})` : email;
+                  });
+                  updateMsg += `\n👥 Гости: ${guestList.join(', ')}`;
+                }
                 await sendMessage(updateMsg);
               }
               return;
