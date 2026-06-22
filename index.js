@@ -85,12 +85,25 @@ async function updateCalendarEvent(eventId, summary, startDateTime, endDateTime,
 }
 
 async function parseCalendarEvent(text) {
-  // Используем GPT чтобы распарсить дату/время/название события
   const today = new Date().toLocaleDateString('ru-RU', { timeZone: 'Europe/Moscow', weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+  const contactsHint = CONTACTS.map(c => `${c.names[0]} = ${c.email}`).join(', ');
   const res = await axios.post('https://api.openai.com/v1/chat/completions', {
     model: 'gpt-4o',
     messages: [
-      { role: 'system', content: `Ты парсишь текст и извлекаешь событие для календаря. Сегодня: ${today} (часовой пояс Europe/Moscow). Верни JSON: {"action": "create/delete/update", "summary": "название", "start": "YYYY-MM-DDTHH:MM:SS", "end": "YYYY-MM-DDTHH:MM:SS", "timezone": "часовой пояс", "location": "адрес или null", "attendees": ["email1", "email2"] или [], "search_query": "ключевые слова для поиска", "is_event": true/false}. Правила: 1) action=create — новое событие. action=delete — удалить (заполни search_query). action=update — перенести/изменить (заполни search_query и новые поля). 2) Если в тексте упомянут город — определи часовой пояс (Дубай → Asia/Dubai, Лондон → Europe/London, Нью-Йорк → America/New_York), иначе Europe/Moscow. 3) location — адрес встречи если упомянут, иначе null. 4) attendees — список email участников если упомянуты, иначе []. 5) Если в тексте есть слово "календарь" в любой форме ("календаре", "календарь") — is_event: true в 100% случаев, без исключений. is_event: false только если слова "календарь" нет в тексте и это не запрос на действие с событием. 6) Если время окончания не указано — добавь 1 час. Верни только JSON без markdown.` },
+      { role: 'system', content: `Ты парсишь текст и извлекаешь событие для календаря. Сегодня: ${today} (часовой пояс Europe/Moscow).
+
+Справочник контактов: ${contactsHint}
+
+Верни JSON: {"action": "create/delete/update", "summary": "название", "start": "YYYY-MM-DDTHH:MM:SS", "end": "YYYY-MM-DDTHH:MM:SS", "timezone": "часовой пояс", "location": "адрес или null", "attendees": ["email1", "email2"] или [], "attendees_unresolved": "имя если не нашёл в справочнике или null", "search_query": "ключевые слова для поиска", "is_event": true/false}.
+
+Правила:
+1) action=create — новое событие. action=delete — удалить. action=update — изменить/перенести.
+2) Если упомянут город — определи timezone (Дубай → Asia/Dubai, Лондон → Europe/London), иначе Europe/Moscow.
+3) location — адрес встречи если упомянут, иначе null.
+4) attendees — email участников. Если в тексте есть слова "гость", "гостем", "гостя", "участник", "участников", "пригласи", "добавь" — ищи email по справочнику. Если имя нашлось — добавь email в attendees. Если имя не нашлось в справочнике — запиши его в attendees_unresolved.
+5) Если в тексте есть слово "календарь" в любой форме — is_event: true без исключений. is_event: false только если слова "календарь" нет и это не запрос на действие с событием.
+6) Если время окончания не указано — добавь 1 час.
+Верни только JSON без markdown.` },
       { role: 'user', content: text }
     ],
     temperature: 0
@@ -706,6 +719,9 @@ app.post('/webhook', async (req, res) => {
                 });
                 confirmMsg += `\n👥 Гости: ${guestList.join(', ')}`;
               }
+              if (parsed.attendees_unresolved) {
+                confirmMsg += `\n⚠️ Не понял, кого поставить гостем: _${parsed.attendees_unresolved}_`;
+              }
               await sendMessage(confirmMsg);
               return;
             }
@@ -737,12 +753,14 @@ app.post('/webhook', async (req, res) => {
                 if (parsed.start) updateMsg += `\n⏰ ${fmtDate(parsed.start)} (${tzLabel})`;
                 if (parsed.location) updateMsg += `\n📍 ${parsed.location}`;
                 if (allAttendeesUpd.length > 0) {
-                  // Показываем имя + email для каждого гостя
                   const guestList = allAttendeesUpd.map(email => {
                     const contact = CONTACTS.find(c => c.email === email);
                     return contact ? `${contact.names[0]} (${email})` : email;
                   });
                   updateMsg += `\n👥 Гости: ${guestList.join(', ')}`;
+                }
+                if (parsed.attendees_unresolved) {
+                  updateMsg += `\n⚠️ Не понял, кого поставить гостем: _${parsed.attendees_unresolved}_`;
                 }
                 await sendMessage(updateMsg);
               }
