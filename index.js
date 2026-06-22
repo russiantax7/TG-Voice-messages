@@ -162,6 +162,9 @@ async function sendMessage(text, parseMode = 'Markdown') {
     console.error('sendMessage error:', e.response?.data || e.message);
   }
 }
+async function sendHtml(text) {
+  return sendMessage(text, 'HTML');
+}
 
 async function deleteMessage(messageId) {
   try { await tg('deleteMessage', { chat_id: OWNER_CHAT_ID, message_id: messageId }); } catch (e) {}
@@ -816,7 +819,7 @@ app.post('/summary', async (req, res) => {
 
     const makeSummary = async (msgs, title) => {
       if (msgs.length === 0) {
-        await sendMessage(`📋 *${title} — ${dateStr}*\n\nСообщений сегодня не было.`);
+        await sendHtml(`📋 <b>${title} — ${dateStr}</b>\n\nСообщений сегодня не было.`);
         return;
       }
       const text = msgs.map(m => `[${m.chat_name}] [${m.from}] [link:${m.link || ''}]: ${m.text}`).join('\n');
@@ -844,7 +847,7 @@ app.post('/summary', async (req, res) => {
 *📎 Список задач от Анастасии*
 — если она прислала свой вечерний список — воспроизведи полностью
 
-Правила: пустые разделы пропускай. Не додумывай. Задача выполнена если есть подтверждение («готово», «сделал», «отправил»). Пиши на русском, кратко и по делу. Используй Markdown (*, —).`
+Правила: пустые разделы пропускай. Не додумывай. Задача выполнена если есть подтверждение («готово», «сделал», «отправил»). Пиши на русском, кратко и по делу. Используй HTML-форматирование: <b>жирный</b>, <i>курсив</i>, — для списков. Для ссылок используй <a href="link">Имя</a>, где link — значение поля link: данного сообщения. Если link пустой — не добавляй ссылку.`
         : `Ты бизнес-аналитик, работающий в компании которая занимается налогами, регистрацией компаний за рубежом и решением юридических задач для состоятельных бенефициаров. Анализируй переписку рабочего чата и составляй структурированное резюме. Имена участников бери из поля from.
 
 Формат:
@@ -866,9 +869,7 @@ app.post('/summary', async (req, res) => {
 *💡 Важные факты*
 — цифры, даты, контакты, договорённости
 
-Правила: пустые разделы пропускай. Не додумывай — только то что есть в переписке. Задача считается поставленной если кто-то явно просит что-то сделать. Задача считается выполненной если есть подтверждение («готово», «сделал», «отправил»). Пиши на русском, кратко и по делу. Используй Markdown (*, —).
-
-Ссылки: для ключевых фраз, решений и поручений добавляй кликабельную ссылку на сообщение в формате Markdown: [Имя](link), где link — значение поля link: данного сообщения. Если link пустой — не добавляй ссылку.`;
+Правила: пустые разделы пропускай. Не додумывай — только то что есть в переписке. Задача считается поставленной если кто-то явно просит что-то сделать. Задача считается выполненной если есть подтверждение («готово», «сделал», «отправил»). Пиши на русском, кратко и по делу. Используй HTML-форматирование: <b>жирный</b>, <i>курсив</i>, — для списков. Для ссылок используй <a href="link">Имя</a>, где link — значение поля link: данного сообщения. Если link пустой — не добавляй ссылку.`;
 
       const r = await axios.post('https://api.openai.com/v1/chat/completions', {
         model: 'gpt-4o',
@@ -877,7 +878,7 @@ app.post('/summary', async (req, res) => {
           { role: 'user', content: text }
         ]
       }, { headers: { Authorization: `Bearer ${OPENAI_API_KEY}` } });
-      await sendMessage(`📋 *${title} — ${dateStr}*\n\n${r.data.choices[0].message.content}`);
+      await sendHtml(`📋 <b>${title} — ${dateStr}</b>\n\n${r.data.choices[0].message.content}`);
     };
 
     const otherMsgs = todayMsgs.filter(m => m.chat_name !== 'PA Shindyaeva');
@@ -911,20 +912,18 @@ app.post('/summary-pa', async (req, res) => {
     const paMsgs = todayMsgs.filter(m => m.chat_name === 'PA Shindyaeva');
 
     if (paMsgs.length === 0) {
-      await sendMessage(`📋 *Резюме: PA Shindyaeva — ${dateStr}*\n\nСообщений сегодня не было.`);
+      await sendHtml(`📋 <b>Резюме: PA Shindyaeva — ${dateStr}</b>\n\nСообщений сегодня не было.`);
       return;
     }
     const text = paMsgs.map(m => `[${m.chat_name}] [${m.from}] [link:${m.link || ''}]: ${m.text}`).join('\n');
     const r = await axios.post('https://api.openai.com/v1/chat/completions', {
       model: 'gpt-4o',
       messages: [
-        { role: 'system', content: `Ты бизнес-аналитик. Анализируй переписку между Alexander и его личным ассистентом Анастасией. Имена бери из поля from.\n\nФормат:\n*🗣 Вопросы и обсуждения*\n— что спрашивал Alexander, какие ответы получил\n\n*📋 Статус задач*\n— задача — статус (выполнена / в работе / не начата)\n\n*✅ Что сделано*\n— что Анастасия выполнила или подтвердила сегодня\n\n*⏳ В работе*\n— что ещё не закрыто, дедлайн если есть\n\n*❗️ Требует внимания*\n— что зависло, не получило ответа или требует решения Alexander\n\n*📎 Список задач от Анастасии*\n— если она прислала свой вечерний список — воспроизведи полностью\n\nПравила: пустые разделы пропускай. Не додумывай. Задача выполнена если есть подтверждение («готово», «сделал», «отправил»). Пиши на русском, кратко и по делу. Используй Markdown (*, —).
-
-Ссылки: для ключевых фраз, решений и поручений добавляй кликабельную ссылку на сообщение в формате Markdown: [Имя](link), где link — значение поля link: данного сообщения. Если link пустой — не добавляй ссылку.` },
+        { role: 'system', content: `Ты бизнес-аналитик. Анализируй переписку между Alexander и его личным ассистентом Анастасией. Имена бери из поля from.\n\nФормат:\n*🗣 Вопросы и обсуждения*\n— что спрашивал Alexander, какие ответы получил\n\n*📋 Статус задач*\n— задача — статус (выполнена / в работе / не начата)\n\n*✅ Что сделано*\n— что Анастасия выполнила или подтвердила сегодня\n\n*⏳ В работе*\n— что ещё не закрыто, дедлайн если есть\n\n*❗️ Требует внимания*\n— что зависло, не получило ответа или требует решения Alexander\n\n*📎 Список задач от Анастасии*\n— если она прислала свой вечерний список — воспроизведи полностью\n\nПравила: пустые разделы пропускай. Не додумывай. Задача выполнена если есть подтверждение («готово», «сделал», «отправил»). Пиши на русском, кратко и по делу. Используй HTML-форматирование: <b>жирный</b>, <i>курсив</i>, — для списков. Для ссылок используй <a href="link">Имя</a>, где link — значение поля link: данного сообщения. Если link пустой — не добавляй ссылку.` },
         { role: 'user', content: text }
       ]
     }, { headers: { Authorization: `Bearer ${OPENAI_API_KEY}` } });
-    await sendMessage(`📋 *Резюме: PA Shindyaeva — ${dateStr}*\n\n${r.data.choices[0].message.content}`);
+    await sendHtml(`📋 <b>Резюме: PA Shindyaeva — ${dateStr}</b>\n\n${r.data.choices[0].message.content}`);
   } catch (e) {
     console.error('/summary-pa error:', e.message);
     await sendMessage('⚠️ Ошибка при формировании резюме PA.');
@@ -1011,7 +1010,7 @@ app.post('/weekly-review', async (req, res) => {
     }, { headers: { Authorization: `Bearer ${OPENAI_API_KEY}` } });
 
     const schedule = `\n\n─────────────────\n📆 *График отчётов GALP:*\n• Резюме рабочих чатов — пн–пт, 20:00 МСК\n• Резюме чата с Анастасией — пн–пт, 21:00 МСК\n• Оценка команды — каждую пятницу, 20:00 МСК`;
-    await sendMessage(`📊 *Еженедельный отчёт по команде — ${dateStr}*\n\n${r.data.choices[0].message.content}${schedule}`);
+    await sendHtml(`📊 <b>Еженедельный отчёт по команде — ${dateStr}</b>\n\n${r.data.choices[0].message.content}${schedule}`);
   } catch (e) {
     console.error('Weekly review error:', e.message);
     await sendMessage('⚠️ Ошибка при формировании еженедельного отчёта.');
