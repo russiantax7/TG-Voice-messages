@@ -1072,3 +1072,63 @@ setInterval(async () => {
     console.error('Calendar reminder error:', e.message);
   }
 }, 15 * 60 * 1000);
+
+// ─── /import — импорт истории из JSON-экспорта Telegram Desktop ───────────
+// POST с телом: { secret, chat_name, data: <содержимое result.json> }
+app.post('/import', async (req, res) => {
+  try {
+    const { secret, chat_name, data } = req.body;
+    if (secret !== ADMIN_SECRET) return res.status(403).json({ error: 'forbidden' });
+    if (!data || !data.messages) return res.status(400).json({ error: 'no messages array' });
+
+    let archive = [];
+    try { archive = JSON.parse(fs.readFileSync(ARCHIVE_FILE, 'utf8')); } catch {}
+
+    const existingLinks = new Set(archive.map(m => m.link).filter(Boolean));
+    const name = chat_name || data.name || 'Неизвестный чат';
+    let added = 0;
+
+    for (const msg of data.messages) {
+      if (msg.type !== 'message') continue;
+
+      // Текст может быть строкой или массивом элементов
+      let text = '';
+      if (typeof msg.text === 'string') {
+        text = msg.text;
+      } else if (Array.isArray(msg.text)) {
+        text = msg.text.map(t => typeof t === 'string' ? t : (t.text || '')).join('');
+      }
+      text = text.trim();
+      if (!text) continue;
+
+      const date = msg.date_unixtime
+        ? parseInt(msg.date_unixtime)
+        : Math.floor(new Date(msg.date).getTime() / 1000);
+
+      const from = msg.from || 'Неизвестно';
+      const chatIdClean = String(data.id || '').replace(/^-100/, '');
+      const link = (msg.id && chatIdClean) ? `https://t.me/c/${chatIdClean}/${msg.id}` : '';
+
+      if (link && existingLinks.has(link)) continue;
+
+      archive.push({ chat_id: data.id || 0, chat_name: name, from, text, date, link });
+      if (link) existingLinks.add(link);
+      added++;
+    }
+
+    // Храним 1 год
+    const cutoff = Date.now() / 1000 - 365 * 24 * 3600;
+    const filtered = archive.filter(m => m.date > cutoff);
+    fs.writeFileSync(ARCHIVE_FILE, JSON.stringify(filtered, null, 2));
+
+    await sendMessage(`✅ Импорт завершён\nЧат: *${name}*\nДобавлено сообщений: ${added}\nВсего в архиве: ${filtered.length}`);
+    res.json({ ok: true, added, total: filtered.length });
+  } catch (e) {
+    console.error('/import error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/', (req, res) => res.json({ status: 'ok' }));
+
+app.listen(PORT, () => console.log(`Bot running on port ${PORT}`));
