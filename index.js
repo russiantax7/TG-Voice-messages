@@ -647,10 +647,18 @@ ${fmtDate(parsed.start)} (${tzLabel})`;
     const chatId = msg.chat.id;
 
     // Пересланное сообщение владельцу — проверяем ДО рабочих чатов
-    if (msg.forward_date && chatId === OWNER_CHAT_ID) {
+    const isForwarded = msg.forward_date || msg.forward_origin || msg.forward_from || msg.forward_from_chat || msg.forward_sender_name;
+    if (isForwarded && chatId === OWNER_CHAT_ID) {
       const fwdText = msg.text || msg.caption || '';
       if (fwdText.trim()) {
-        const fromName = msg.forward_from?.first_name || msg.forward_from_chat?.title || 'Неизвестно';
+        const fromName =
+          msg.forward_from?.first_name ||
+          msg.forward_from_chat?.title ||
+          msg.forward_sender_name ||
+          msg.forward_origin?.sender_user?.first_name ||
+          msg.forward_origin?.chat?.title ||
+          msg.forward_origin?.sender_user_name ||
+          'Неизвестно';
         const key = `fwd_${Date.now()}`;
         if (!global.fwdStore) global.fwdStore = {};
         global.fwdStore[key] = fwdText;
