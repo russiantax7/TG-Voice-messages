@@ -100,7 +100,7 @@ async function parseCalendarEvent(text) {
 1) action=create — новое событие. action=delete — удалить. action=update — изменить/перенести.
 2) Если упомянут город — определи timezone (Дубай → Asia/Dubai, Лондон → Europe/London), иначе Europe/Moscow.
 3) location — адрес встречи если упомянут, иначе null.
-4) attendees — email участников. Если в тексте есть слова "гость", "гостем", "гостя", "участник", "участников", "пригласи", "добавь" — ищи email по справочнику. Если имя нашлось — добавь email в attendees. Если имя не нашлось в справочнике — запиши его в attendees_unresolved.
+4) attendees — email участников. Добавляй email в attendees ТОЛЬКО если в тексте есть явный триггер: "гость", "гостем", "гостя", "участник", "участников", "пригласи", "добавь [имя]", "с участием". Просто упоминание имени в названии встречи ("встреча с Мариной", "созвон с Игорем") — НЕ добавляй в attendees, это часть названия события. Ищи email по справочнику только при наличии триггера. Если триггер есть но имя не найдено в справочнике — запиши в attendees_unresolved.
 5) Если в тексте есть слово "календарь" в любой форме — is_event: true без исключений. is_event: false только если слова "календарь" нет и это не запрос на действие с событием.
 6) Если время окончания не указано — добавь 1 час.
 Верни только JSON без markdown.` },
@@ -580,6 +580,67 @@ app.post('/webhook', async (req, res) => {
       return res.sendStatus(200);
     }
 
+    // ─── callback_query — ответ на нажатие кнопки под пересланным сообщением
+    if (update.callback_query) {
+      const cq = update.callback_query;
+      await tg('answerCallbackQuery', { callback_query_id: cq.id });
+      const [action, ...rest] = (cq.data || '').split(':');
+      const key = rest.join(':');
+      const fwdText = (global.fwdStore && global.fwdStore[key]) || key;
+      if (action === 'fwd_calendar') {
+        // Обрабатываем как событие в календарь
+        try {
+          await tg('editMessageReplyMarkup', { chat_id: OWNER_CHAT_ID, message_id: cq.message.message_id, reply_markup: { inline_keyboard: [] } });
+          const parsed = await parseCalendarEvent(fwdText);
+          if (!parsed.start) {
+            await sendMessage(`❓ Не нашёл дату в сообщении. Напиши когда поставить мероприятие:`);
+            return;
+          }
+          const tz = parsed.timezone || 'Europe/Moscow';
+          const tzLabel = tz === 'Europe/Moscow' ? 'МСК' : tz;
+          const fmtDate = (s) => { const [dp,tp] = s.split('T'); const [,m,d] = dp.split('-'); const [hh,mm] = tp.split(':'); return `${d}.${m} ${hh}:${mm}`; };
+          const allAttendees = [...new Set([...(parsed.attendees || [])])];
+          const created = await createCalendarEvent(parsed.summary, parsed.start, parsed.end, '', tz, parsed.location, allAttendees);
+          const events = loadEvents();
+          events.push({ id: created.id, summary: parsed.summary, start: parsed.start });
+          saveEvents(events);
+          let confirmMsg = `📅 Событие добавлено в календарь:
+*${parsed.summary}*
+${fmtDate(parsed.start)} (${tzLabel})`;
+          if (parsed.location) confirmMsg += `
+📍 ${parsed.location}`;
+          if (allAttendees.length > 0) {
+            const guestList = allAttendees.map(email => {
+              const contact = CONTACTS.find(c => c.email === email);
+              return contact ? `${contact.names[0]} (${email})` : email;
+            });
+            confirmMsg += `
+👥 Гости: ${guestList.join(', ')}`;
+          }
+          if (parsed.attendees_unresolved) confirmMsg += `
+⚠️ Не понял, кого поставить гостем: _${parsed.attendees_unresolved}_`;
+          await sendMessage(confirmMsg);
+        } catch (e) {
+          await sendMessage(`⚠️ Ошибка при создании события: ${e.message}`);
+        }
+      } else if (action === 'fwd_task') {
+        // Добавляем как задачу
+        try {
+          await tg('editMessageReplyMarkup', { chat_id: OWNER_CHAT_ID, message_id: cq.message.message_id, reply_markup: { inline_keyboard: [] } });
+          const tasks = loadTasks();
+          const newId = tasks.length > 0 ? Math.max(...tasks.map(t => t.id)) + 1 : 1;
+          tasks.push({ id: newId, text: fwdText, status: 'open', created: new Date().toISOString() });
+          saveTasks(tasks);
+          await sendMessage(`✅ Задача добавлена`);
+        } catch (e) {
+          await sendMessage(`⚠️ Ошибка: ${e.message}`);
+        }
+      } else if (action === 'fwd_skip') {
+        await tg('editMessageReplyMarkup', { chat_id: OWNER_CHAT_ID, message_id: cq.message.message_id, reply_markup: { inline_keyboard: [] } });
+      }
+      return;
+    }
+
     const msg = update.message || update.edited_message;
     if (!msg) return;
 
@@ -659,6 +720,38 @@ app.post('/webhook', async (req, res) => {
       return;
     }
 
+    // ─── Пересланное сообщение — показываем кнопки
+    if (msg.forward_date && chatId === OWNER_CHAT_ID) {
+      const fwdText = msg.text || msg.caption || '';
+      if (fwdText.trim()) {
+        const fromName = msg.forward_from?.first_name || msg.forward_from_chat?.title || 'Неизвестно';
+        // Ограничиваем текст до 200 символов для callback_data (max 64 bytes — поэтому шлем полный текст через хранилище)
+        const key = `fwd_${Date.now()}`;
+        // Храним полный текст в памяти процесса
+        if (!global.fwdStore) global.fwdStore = {};
+        global.fwdStore[key] = fwdText;
+        // Чистим старые записи (старше 1 часа)
+        const hour = Date.now() - 3600000;
+        Object.keys(global.fwdStore).forEach(k => { if (parseInt(k.split('_')[1]) < hour) delete global.fwdStore[k]; });
+        await tg('sendMessage', {
+          chat_id: OWNER_CHAT_ID,
+          text: `📨 *Пересланное* от ${fromName}:
+_${fwdText.slice(0, 200)}${fwdText.length > 200 ? '...' : ''}_
+
+Что сделать?`,
+          parse_mode: 'Markdown',
+          reply_markup: {
+            inline_keyboard: [[
+              { text: '📅 В календарь', callback_data: `fwd_calendar:${key}` },
+              { text: '✅ Задача', callback_data: `fwd_task:${key}` },
+              { text: '❌ Пропустить', callback_data: `fwd_skip:${key}` }
+            ]]
+          }
+        });
+      }
+      return;
+    }
+
     const data = loadTasks();
     let text = null;
 
@@ -686,7 +779,7 @@ app.post('/webhook', async (req, res) => {
 
       // Проверяем — не команда ли это для календаря
       // Только явные команды на добавление/изменение события (не рассказы о прошлом)
-      const calKeywords = /запиши на|запишь|назначь|добавь в календар|в календар|создай встреч|запланируй|запланиров|созвон на|встреча в пятн|встреча в пон|встреча в вт|встреча в ср|встреча в чет|встреча в суб|встреча в вос|встреча завтра|встреча сегодня|ужин в|обед в|поездка в|перенеси|перенес|измени|измень|измени название|переименуй|переименова|сдвинь|сдвин|удали встреч|удали событи|отмени|отмень|удали событ|удали встреч|убери событ|убери встреч|в календаре|событие в|событие на/i;
+      const calKeywords = /календар|запиши на|запишь|назначь|добавь в календар|в календар|создай встреч|запланируй|запланиров|созвон на|встреча в пятн|встреча в пон|встреча в вт|встреча в ср|встреча в чет|встреча в суб|встреча в вос|встреча завтра|встреча сегодня|ужин в|обед в|поездка в|перенеси|перенес|измени|измень|измени название|переименуй|переименова|сдвинь|сдвин|удали встреч|удали событи|отмени|отмень|удали событ|удали встреч|убери событ|убери встреч|в календаре|событие в|событие на/i;
       if (calKeywords.test(text)) {
         try {
           // Нормализация: Whisper иногда пишет "собачка" вместо "@"
@@ -705,10 +798,8 @@ app.post('/webhook', async (req, res) => {
             const fmtDate = (s) => { const [dp,tp] = s.split('T'); const [,m,d] = dp.split('-'); const [hh,mm] = tp.split(':'); return `${d}.${m} ${hh}:${mm}`; };
 
             if (action === 'create') {
-              // Объединяем attendees от GPT + из справочника по именам в тексте
-              const resolvedEmails = resolveAttendees(normalizedText);
-              const gptEmails = (parsed.attendees || []);
-              const allAttendees = [...new Set([...gptEmails, ...resolvedEmails])];
+              // Гостей определяет только GPT (справочник уже передан в промпт)
+              const allAttendees = [...new Set([...(parsed.attendees || [])])];
               const created = await createCalendarEvent(parsed.summary, parsed.start, parsed.end, '', tz, parsed.location, allAttendees);
               const events = loadEvents();
               events.push({ id: created.id, summary: parsed.summary, start: parsed.start });
@@ -748,8 +839,7 @@ app.post('/webhook', async (req, res) => {
                 saveEvents(events.filter(e => e.id !== found.id));
                 await sendMessage(`🗑 Событие удалено:\n*${found.summary}*`);
               } else {
-                const resolvedEmailsUpd = resolveAttendees(normalizedText);
-                const allAttendeesUpd = [...new Set([...(parsed.attendees || []), ...resolvedEmailsUpd])];
+                const allAttendeesUpd = [...new Set([...(parsed.attendees || [])])];
                 await updateCalendarEvent(found.id, found.summary, parsed.start, parsed.end, tz, parsed.location, allAttendeesUpd);
                 saveEvents(events.map(e => e.id === found.id ? { ...e, start: parsed.start } : e));
                 let updateMsg = `📅 Событие обновлено:\n*${found.summary}*`;
