@@ -647,6 +647,17 @@ ${fmtDate(parsed.start)} (${tzLabel})`;
     const chatId = msg.chat.id;
 
     // Пересланное сообщение владельцу — проверяем ДО рабочих чатов
+    // DEBUG: логируем ключи входящего сообщения если это личный чат владельца
+    if (chatId === OWNER_CHAT_ID) {
+      console.log('DEBUG msg keys:', JSON.stringify(Object.keys(msg)));
+      console.log('DEBUG forward fields:', JSON.stringify({
+        forward_date: msg.forward_date,
+        forward_origin: msg.forward_origin,
+        forward_from: msg.forward_from,
+        forward_from_chat: msg.forward_from_chat,
+        forward_sender_name: msg.forward_sender_name
+      }));
+    }
     const isForwarded = msg.forward_date || msg.forward_origin || msg.forward_from || msg.forward_from_chat || msg.forward_sender_name;
     if (isForwarded && chatId === OWNER_CHAT_ID) {
       const fwdText = msg.text || msg.caption || '';
