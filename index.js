@@ -646,6 +646,35 @@ ${fmtDate(parsed.start)} (${tzLabel})`;
 
     const chatId = msg.chat.id;
 
+    // Пересланное сообщение владельцу — проверяем ДО рабочих чатов
+    if (msg.forward_date && chatId === OWNER_CHAT_ID) {
+      const fwdText = msg.text || msg.caption || '';
+      if (fwdText.trim()) {
+        const fromName = msg.forward_from?.first_name || msg.forward_from_chat?.title || 'Неизвестно';
+        const key = `fwd_${Date.now()}`;
+        if (!global.fwdStore) global.fwdStore = {};
+        global.fwdStore[key] = fwdText;
+        const hour = Date.now() - 3600000;
+        Object.keys(global.fwdStore).forEach(k => { if (parseInt(k.split('_')[1]) < hour) delete global.fwdStore[k]; });
+        await tg('sendMessage', {
+          chat_id: OWNER_CHAT_ID,
+          text: `📨 *Пересланное* от ${fromName}:
+_${fwdText.slice(0, 200)}${fwdText.length > 200 ? '...' : ''}_
+
+Что сделать?`,
+          parse_mode: 'Markdown',
+          reply_markup: {
+            inline_keyboard: [[
+              { text: '📅 В календарь', callback_data: `fwd_calendar:${key}` },
+              { text: '✅ Задача', callback_data: `fwd_task:${key}` },
+              { text: '❌ Пропустить', callback_data: `fwd_skip:${key}` }
+            ]]
+          }
+        });
+      }
+      return;
+    }
+
     // Сообщение из рабочего чата — сохраняем для резюме
     if (WORK_CHATS.has(chatId)) {
       if (msg.text || msg.caption) {
@@ -716,38 +745,6 @@ ${fmtDate(parsed.start)} (${tzLabel})`;
         });
       } catch (e) {
         console.error('Lead handler error:', e.message);
-      }
-      return;
-    }
-
-    // ─── Пересланное сообщение — показываем кнопки
-    if (msg.forward_date && chatId === OWNER_CHAT_ID) {
-      const fwdText = msg.text || msg.caption || '';
-      if (fwdText.trim()) {
-        const fromName = msg.forward_from?.first_name || msg.forward_from_chat?.title || 'Неизвестно';
-        // Ограничиваем текст до 200 символов для callback_data (max 64 bytes — поэтому шлем полный текст через хранилище)
-        const key = `fwd_${Date.now()}`;
-        // Храним полный текст в памяти процесса
-        if (!global.fwdStore) global.fwdStore = {};
-        global.fwdStore[key] = fwdText;
-        // Чистим старые записи (старше 1 часа)
-        const hour = Date.now() - 3600000;
-        Object.keys(global.fwdStore).forEach(k => { if (parseInt(k.split('_')[1]) < hour) delete global.fwdStore[k]; });
-        await tg('sendMessage', {
-          chat_id: OWNER_CHAT_ID,
-          text: `📨 *Пересланное* от ${fromName}:
-_${fwdText.slice(0, 200)}${fwdText.length > 200 ? '...' : ''}_
-
-Что сделать?`,
-          parse_mode: 'Markdown',
-          reply_markup: {
-            inline_keyboard: [[
-              { text: '📅 В календарь', callback_data: `fwd_calendar:${key}` },
-              { text: '✅ Задача', callback_data: `fwd_task:${key}` },
-              { text: '❌ Пропустить', callback_data: `fwd_skip:${key}` }
-            ]]
-          }
-        });
       }
       return;
     }
