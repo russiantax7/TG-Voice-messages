@@ -553,6 +553,8 @@ async function processText(text, data) {
 }
 
 // ─── Webhook ──────────────────────────────────────────────────────
+app.get('/version', (req, res) => res.json({ version: 'debug-fwd-v3', deployed: new Date().toISOString() }));
+
 app.post('/webhook', async (req, res) => {
   res.sendStatus(200);
   try {
