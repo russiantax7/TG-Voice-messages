@@ -1225,7 +1225,3 @@ app.post('/import', async (req, res) => {
     res.status(500).json({ error: e.message });
   }
 });
-
-app.get('/', (req, res) => res.json({ status: 'ok', v: 'fwd2' }));
-
-app.listen(PORT, () => console.log(`Bot running on port ${PORT}`));
