@@ -123,7 +123,7 @@ async function parseCalendarEvent(text) {
 
 Справочник контактов: ${contactsHint}
 
-Верни JSON: {"action": "create/delete/update", "summary": "название", "start": "YYYY-MM-DDTHH:MM:SS", "end": "YYYY-MM-DDTHH:MM:SS", "timezone": "часовой пояс", "location": "адрес или null", "attendees": ["email1", "email2"] или [], "attendees_unresolved": "имя если не нашёл в справочнике или null", "search_query": "ключевые слова для поиска", "is_event": true/false}.
+Верни JSON: {"action": "create/delete/update", "summary": "название", "start": "YYYY-MM-DDTHH:MM:SS", "end": "YYYY-MM-DDTHH:MM:SS", "timezone": "часовой пояс", "location": "адрес или null", "attendees": ["email1", "email2"] или [], "attendees_unresolved": "имя если не нашёл в справочнике или null", "search_query": "ключевые слова для поиска", "description": "полный исходный текст сообщения", "is_event": true/false}.
 
 Правила:
 1) action=create — новое событие. action=delete — удалить. action=update — изменить/перенести.
@@ -617,7 +617,12 @@ app.post('/webhook', async (req, res) => {
       await tg('answerCallbackQuery', { callback_query_id: cq.id });
       const [action, ...rest] = (cq.data || '').split(':');
       const key = rest.join(':');
-      const fwdText = getFwdEntry(key) || (global.fwdStore && global.fwdStore[key]) || key;
+      const fwdText = getFwdEntry(key) || (global.fwdStore && global.fwdStore[key]) || null;
+      if (!fwdText || fwdText.startsWith('fwd_')) {
+        await tg('editMessageReplyMarkup', { chat_id: OWNER_CHAT_ID, message_id: cq.message.message_id, reply_markup: { inline_keyboard: [] } });
+        await sendMessage('⚠️ Текст сообщения не сохранился — перешли ещё раз.');
+        return;
+      }
       if (action === 'fwd_calendar') {
         // Обрабатываем как событие в календарь
         try {
@@ -683,7 +688,7 @@ ${fmtDate(parsed.start)} (${tzLabel})`;
     // Пересланное сообщение владельцу — проверяем ДО рабочих чатов
     const isForwarded = msg.forward_date || msg.forward_origin || msg.forward_from || msg.forward_from_chat || msg.forward_sender_name;
     if (isForwarded && chatId === OWNER_CHAT_ID) {
-      const fwdText = msg.text || msg.caption || '';
+      const fwdText = msg.text || msg.caption || (msg.photo ? '[фото]' : '') || (msg.document ? '[документ]' : '') || '';
       if (fwdText.trim()) {
         const fromName =
           msg.forward_from?.first_name ||
@@ -805,6 +810,33 @@ _${fwdText.slice(0, 200)}${fwdText.length > 200 ? '...' : ''}_
     }
 
     if (text) {
+      // Детектор даты/времени — спрашиваем задача или календарь
+      const hasDateTime = /\b(в \d{1,2}[:.:]\d{2}|в \d{1,2} час|завтра|послезавтра|в понедельник|во вторник|в среду|в четверг|в пятницу|в субботу|в воскресенье|\d{1,2}[.\-]\d{1,2}([.\-]\d{2,4})?|январ|феврал|март|апрел|ма[йя]|июн|июл|август|сентябр|октябр|ноябр|декабр)/i.test(text);
+      const hasCalKeyword = /календар/i.test(text);
+      const hasTaskKeyword = /задач|напомни|сделать|купить|позвонить|написать|отправить|подготовить/i.test(text);
+      if (hasDateTime && !hasCalKeyword && !hasTaskKeyword) {
+        // Сохраняем текст и показываем кнопки
+        const key = `fwd_${Date.now()}`;
+        try { setFwdEntry(key, text); } catch(e) {
+          if (!global.fwdStore) global.fwdStore = {};
+          global.fwdStore[key] = text;
+        }
+        await tg('sendMessage', {
+          chat_id: OWNER_CHAT_ID,
+          text: `❓ Это задача или мероприятие?
+_${text.slice(0, 200)}${text.length > 200 ? '...' : ''}_`,
+          parse_mode: 'Markdown',
+          reply_markup: {
+            inline_keyboard: [[
+              { text: '📅 В календарь', callback_data: `fwd_calendar:${key}` },
+              { text: '✅ Задача', callback_data: `fwd_task:${key}` },
+              { text: '❌ Пропустить', callback_data: `fwd_skip:${key}` }
+            ]]
+          }
+        });
+        return;
+      }
+
       // Сообщение для помощницы — переслать в PA Shindyaeva
       const assistantMatch = text.match(/^(?:анастасии|для помощницы|напиши анастасии|помощнице|скажи помощнице|скажи насте|скажи анастасии|поставь задачу для помощницы|поставь задачу для насти|поставь задачу анастасии|задача для помощницы|задача для насти|задача анастасии|для насти|настя)[:.\s]+(.+)/is);
       if (assistantMatch) {
@@ -841,7 +873,7 @@ _${fwdText.slice(0, 200)}${fwdText.length > 200 ? '...' : ''}_
             if (action === 'create') {
               // Гостей определяет только GPT (справочник уже передан в промпт)
               const allAttendees = [...new Set([...(parsed.attendees || [])])];
-              const created = await createCalendarEvent(parsed.summary, parsed.start, parsed.end, '', tz, parsed.location, allAttendees);
+              const created = await createCalendarEvent(parsed.summary, parsed.start, parsed.end, parsed.description || '', tz, parsed.location, allAttendees);
               const events = loadEvents();
               events.push({ id: created.id, summary: parsed.summary, start: parsed.start });
               saveEvents(events);
