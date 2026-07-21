@@ -143,6 +143,21 @@ async function parseCalendarEvent(text) {
 const app = express();
 app.use(express.json());
 
+// Проверяем доступность /data/ при старте
+try {
+  fs.writeFileSync('/data/.healthcheck', Date.now().toString());
+  fs.unlinkSync('/data/.healthcheck');
+  console.log('[startup] /data/ disk OK');
+} catch(e) {
+  console.error('[startup] /data/ disk UNAVAILABLE:', e.message);
+  // Уведомим владельца после запуска сервера
+  setTimeout(async () => {
+    try {
+      await tg('sendMessage', { chat_id: OWNER_CHAT_ID, text: '⚠️ Диск /data/ недоступен — кнопки могут не работать после перезапуска.' });
+    } catch {}
+  }, 5000);
+}
+
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const OWNER_CHAT_ID = 489450415;
@@ -614,16 +629,19 @@ app.post('/webhook', async (req, res) => {
     // ─── callback_query — ответ на нажатие кнопки под пересланным сообщением
     if (update.callback_query) {
       const cq = update.callback_query;
-      await tg('answerCallbackQuery', { callback_query_id: cq.id });
-      const [action, ...rest] = (cq.data || '').split(':');
-      const key = rest.join(':');
-      const fwdText = getFwdEntry(key) || (global.fwdStore && global.fwdStore[key]) || null;
-      if (!fwdText || fwdText.startsWith('fwd_')) {
-        await tg('editMessageReplyMarkup', { chat_id: OWNER_CHAT_ID, message_id: cq.message.message_id, reply_markup: { inline_keyboard: [] } });
-        await sendMessage('⚠️ Текст сообщения не сохранился — перешли ещё раз.');
-        return;
-      }
-      if (action === 'fwd_calendar') {
+      try {
+        await tg('answerCallbackQuery', { callback_query_id: cq.id });
+        const [action, ...rest] = (cq.data || '').split(':');
+        const key = rest.join(':');
+        console.log('[callback] action:', action, 'key:', key);
+        const fwdText = getFwdEntry(key) || (global.fwdStore && global.fwdStore[key]) || null;
+        console.log('[callback] fwdText found:', !!fwdText);
+        if (!fwdText || fwdText.startsWith('fwd_')) {
+          await tg('editMessageReplyMarkup', { chat_id: OWNER_CHAT_ID, message_id: cq.message.message_id, reply_markup: { inline_keyboard: [] } });
+          await sendMessage('⚠️ Текст сообщения не сохранился — перешли ещё раз.');
+          return;
+        }
+        if (action === 'fwd_calendar') {
         // Обрабатываем как событие в календарь
         try {
           await tg('editMessageReplyMarkup', { chat_id: OWNER_CHAT_ID, message_id: cq.message.message_id, reply_markup: { inline_keyboard: [] } });
@@ -673,9 +691,13 @@ ${fmtDate(parsed.start)} (${tzLabel})`;
         } catch (e) {
           await sendMessage(`⚠️ Ошибка: ${e.message}`);
         }
-      } else if (action === 'fwd_skip') {
-        await tg('editMessageReplyMarkup', { chat_id: OWNER_CHAT_ID, message_id: cq.message.message_id, reply_markup: { inline_keyboard: [] } });
-        deleteFwdEntry(key);
+        } else if (action === 'fwd_skip') {
+          await tg('editMessageReplyMarkup', { chat_id: OWNER_CHAT_ID, message_id: cq.message.message_id, reply_markup: { inline_keyboard: [] } });
+          deleteFwdEntry(key);
+        }
+      } catch(e) {
+        console.error('[callback] error:', e.message);
+        try { await sendMessage(`⚠️ Ошибка при обработке кнопки: ${e.message}`); } catch {}
       }
       return;
     }
