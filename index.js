@@ -64,6 +64,35 @@ function loadEvents() {
 function saveEvents(events) {
   fs.writeFileSync(EVENTS_FILE, JSON.stringify(events, null, 2));
 }
+// ─── fwd_store — хранилище пересланных сообщений на диске ────────────────────
+const FWD_STORE_FILE = '/data/fwd_store.json';
+function loadFwdStore() {
+  try { return JSON.parse(fs.readFileSync(FWD_STORE_FILE, 'utf8')); } catch { return {}; }
+}
+function saveFwdStore(store) {
+  fs.writeFileSync(FWD_STORE_FILE, JSON.stringify(store, null, 2));
+}
+function setFwdEntry(key, text) {
+  const store = loadFwdStore();
+  // Чистим записи старше 24 часов
+  const cutoff = Date.now() - 86400000;
+  for (const k of Object.keys(store)) {
+    if (parseInt(k.split('_')[1]) < cutoff) delete store[k];
+  }
+  store[key] = text;
+  saveFwdStore(store);
+}
+function getFwdEntry(key) {
+  const store = loadFwdStore();
+  return store[key] || null;
+}
+function deleteFwdEntry(key) {
+  const store = loadFwdStore();
+  delete store[key];
+  saveFwdStore(store);
+}
+
+
 async function deleteCalendarEvent(eventId) {
   const calendar = getCalendarClient();
   await calendar.events.delete({ calendarId: CALENDAR_ID, eventId });
@@ -588,7 +617,7 @@ app.post('/webhook', async (req, res) => {
       await tg('answerCallbackQuery', { callback_query_id: cq.id });
       const [action, ...rest] = (cq.data || '').split(':');
       const key = rest.join(':');
-      const fwdText = (global.fwdStore && global.fwdStore[key]) || key;
+      const fwdText = getFwdEntry(key) || key;
       if (action === 'fwd_calendar') {
         // Обрабатываем как событие в календарь
         try {
@@ -622,6 +651,7 @@ ${fmtDate(parsed.start)} (${tzLabel})`;
           if (parsed.attendees_unresolved) confirmMsg += `
 ⚠️ Не понял, кого поставить гостем: _${parsed.attendees_unresolved}_`;
           await sendMessage(confirmMsg);
+          deleteFwdEntry(key);
         } catch (e) {
           await sendMessage(`⚠️ Ошибка при создании события: ${e.message}`);
         }
@@ -634,11 +664,13 @@ ${fmtDate(parsed.start)} (${tzLabel})`;
           tasks.push({ id: newId, text: fwdText, status: 'open', created: new Date().toISOString() });
           saveTasks(tasks);
           await sendMessage(`✅ Задача добавлена`);
+          deleteFwdEntry(key);
         } catch (e) {
           await sendMessage(`⚠️ Ошибка: ${e.message}`);
         }
       } else if (action === 'fwd_skip') {
         await tg('editMessageReplyMarkup', { chat_id: OWNER_CHAT_ID, message_id: cq.message.message_id, reply_markup: { inline_keyboard: [] } });
+        deleteFwdEntry(key);
       }
       return;
     }
@@ -662,10 +694,7 @@ ${fmtDate(parsed.start)} (${tzLabel})`;
           msg.forward_origin?.sender_user_name ||
           'Неизвестно';
         const key = `fwd_${Date.now()}`;
-        if (!global.fwdStore) global.fwdStore = {};
-        global.fwdStore[key] = fwdText;
-        const hour = Date.now() - 3600000;
-        Object.keys(global.fwdStore).forEach(k => { if (parseInt(k.split('_')[1]) < hour) delete global.fwdStore[k]; });
+        setFwdEntry(key, fwdText);
         await tg('sendMessage', {
           chat_id: OWNER_CHAT_ID,
           text: `📨 *Пересланное* от ${fromName}:
