@@ -617,7 +617,7 @@ app.post('/webhook', async (req, res) => {
       await tg('answerCallbackQuery', { callback_query_id: cq.id });
       const [action, ...rest] = (cq.data || '').split(':');
       const key = rest.join(':');
-      const fwdText = getFwdEntry(key) || key;
+      const fwdText = getFwdEntry(key) || (global.fwdStore && global.fwdStore[key]) || key;
       if (action === 'fwd_calendar') {
         // Обрабатываем как событие в календарь
         try {
@@ -694,7 +694,12 @@ ${fmtDate(parsed.start)} (${tzLabel})`;
           msg.forward_origin?.sender_user_name ||
           'Неизвестно';
         const key = `fwd_${Date.now()}`;
-        setFwdEntry(key, fwdText);
+        try { setFwdEntry(key, fwdText); } catch(e) {
+          // fallback: память если диск недоступен
+          if (!global.fwdStore) global.fwdStore = {};
+          global.fwdStore[key] = fwdText;
+          console.error('fwd_store write error:', e.message);
+        }
         await tg('sendMessage', {
           chat_id: OWNER_CHAT_ID,
           text: `📨 *Пересланное* от ${fromName}:
