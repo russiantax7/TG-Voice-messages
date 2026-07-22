@@ -626,7 +626,7 @@ app.post('/webhook', async (req, res) => {
       return res.sendStatus(200);
     }
 
-    // ─── callback_query — ответ на нажатие кнопки под пересланным сообщением
+    // ─── callback_query — ответ на нажатие кнопки
     if (update.callback_query) {
       const cq = update.callback_query;
       try {
@@ -635,26 +635,27 @@ app.post('/webhook', async (req, res) => {
         const key = rest.join(':');
         console.log('[callback] action:', action, 'key:', key);
         const fwdText = getFwdEntry(key) || (global.fwdStore && global.fwdStore[key]) || null;
-        console.log('[callback] fwdText found:', !!fwdText);
+        console.log('[callback] fwdText found:', !!fwdText, fwdText ? fwdText.slice(0,50) : 'null');
+
         if (!fwdText || fwdText.startsWith('fwd_')) {
           await tg('editMessageReplyMarkup', { chat_id: OWNER_CHAT_ID, message_id: cq.message.message_id, reply_markup: { inline_keyboard: [] } });
           await sendMessage('⚠️ Текст сообщения не сохранился — перешли ещё раз.');
           return;
         }
+
+        await tg('editMessageReplyMarkup', { chat_id: OWNER_CHAT_ID, message_id: cq.message.message_id, reply_markup: { inline_keyboard: [] } });
+
         if (action === 'fwd_calendar') {
-        // Обрабатываем как событие в календарь
-        try {
-          await tg('editMessageReplyMarkup', { chat_id: OWNER_CHAT_ID, message_id: cq.message.message_id, reply_markup: { inline_keyboard: [] } });
           const parsed = await parseCalendarEvent(fwdText);
           if (!parsed.start) {
-            await sendMessage(`❓ Не нашёл дату в сообщении. Напиши когда поставить мероприятие:`);
+            await sendMessage('❓ Не нашёл дату в сообщении. Напиши когда поставить мероприятие:');
             return;
           }
           const tz = parsed.timezone || 'Europe/Moscow';
           const tzLabel = tz === 'Europe/Moscow' ? 'МСК' : tz;
           const fmtDate = (s) => { const [dp,tp] = s.split('T'); const [,m,d] = dp.split('-'); const [hh,mm] = tp.split(':'); return `${d}.${m} ${hh}:${mm}`; };
           const allAttendees = [...new Set([...(parsed.attendees || [])])];
-          const created = await createCalendarEvent(parsed.summary, parsed.start, parsed.end, '', tz, parsed.location, allAttendees);
+          const created = await createCalendarEvent(parsed.summary, parsed.start, parsed.end, parsed.description || fwdText, tz, parsed.location, allAttendees);
           const events = loadEvents();
           events.push({ id: created.id, summary: parsed.summary, start: parsed.start });
           saveEvents(events);
@@ -675,28 +676,21 @@ ${fmtDate(parsed.start)} (${tzLabel})`;
 ⚠️ Не понял, кого поставить гостем: _${parsed.attendees_unresolved}_`;
           await sendMessage(confirmMsg);
           deleteFwdEntry(key);
-        } catch (e) {
-          await sendMessage(`⚠️ Ошибка при создании события: ${e.message}`);
-        }
-      } else if (action === 'fwd_task') {
-        // Добавляем как задачу
-        try {
-          await tg('editMessageReplyMarkup', { chat_id: OWNER_CHAT_ID, message_id: cq.message.message_id, reply_markup: { inline_keyboard: [] } });
+
+        } else if (action === 'fwd_task') {
           const tasks = loadTasks();
           const newId = tasks.length > 0 ? Math.max(...tasks.map(t => t.id)) + 1 : 1;
           tasks.push({ id: newId, text: fwdText, status: 'open', created: new Date().toISOString() });
           saveTasks(tasks);
-          await sendMessage(`✅ Задача добавлена`);
+          await sendMessage('✅ Задача добавлена');
           deleteFwdEntry(key);
-        } catch (e) {
-          await sendMessage(`⚠️ Ошибка: ${e.message}`);
-        }
+
         } else if (action === 'fwd_skip') {
-          await tg('editMessageReplyMarkup', { chat_id: OWNER_CHAT_ID, message_id: cq.message.message_id, reply_markup: { inline_keyboard: [] } });
           deleteFwdEntry(key);
         }
+
       } catch(e) {
-        console.error('[callback] error:', e.message);
+        console.error('[callback] error:', e.message, e.stack);
         try { await sendMessage(`⚠️ Ошибка при обработке кнопки: ${e.message}`); } catch {}
       }
       return;
